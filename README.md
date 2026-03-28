@@ -1,6 +1,6 @@
-# Polymarket Copy Trading Bot (Rust)
+# Polymarket Copy Trading Bot 
 
-Rust rewrite of the original TypeScript copytrading bot.
+
 
 ## Features
 
