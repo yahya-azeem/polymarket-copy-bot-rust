@@ -63,7 +63,7 @@ impl PolymarketCopyBot {
 
     async fn initialize(&mut self) -> Result<()> {
         info!("Polymarket Copy Trading Bot (Rust)");
-        info!("Target wallet: {}", self.config.target_wallet);
+        info!("Target wallets: {}", self.config.target_wallets.join(", "));
         info!(
             "Position multiplier: {}%",
             self.config.trading.position_multiplier * 100.0
@@ -131,8 +131,8 @@ impl PolymarketCopyBot {
 
         self.stats.trades_detected += 1;
         info!(
-            "NEW TRADE | {} {} {} USDC @ {} | token={} market={}",
-            trade.side, trade.outcome, trade.size_usdc, trade.price, trade.token_id, trade.market
+            "NEW TRADE | wallet={} | {} {} {} USDC @ {} | token={} market={}",
+            trade.original_target_wallet, trade.side, trade.outcome, trade.size_usdc, trade.price, trade.token_id, trade.market
         );
 
         if trade.side == "SELL" && !self.config.trading.copy_sells {
@@ -140,7 +140,7 @@ impl PolymarketCopyBot {
             return;
         }
 
-        let copy_notional = self.executor.calculate_copy_size(trade.size_usdc).await;
+        let copy_notional = self.executor.calculate_copy_size(trade.size_usdc, &trade.original_target_wallet).await;
 
         if trade.side == "SELL" {
             let needed_shares = self
@@ -211,11 +211,11 @@ impl PolymarketCopyBot {
     fn trade_keys(&self, trade: &Trade) -> Vec<String> {
         let mut keys = Vec::new();
         if !trade.tx_hash.is_empty() {
-            keys.push(trade.tx_hash.clone());
+            keys.push(format!("{}-{}", trade.original_target_wallet, trade.tx_hash));
         }
         keys.push(format!(
-            "{}|{}|{}|{}|{}",
-            trade.token_id, trade.side, trade.size_usdc, trade.price, trade.timestamp_ms
+            "{}|{}|{}|{}|{}|{}",
+            trade.original_target_wallet, trade.token_id, trade.side, trade.size_usdc, trade.price, trade.timestamp_ms
         ));
         keys
     }

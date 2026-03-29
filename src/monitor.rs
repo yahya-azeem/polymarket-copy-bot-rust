@@ -17,6 +17,7 @@ pub struct Trade {
     pub price: f64,
     pub size_usdc: f64,
     pub outcome: String,
+    pub original_target_wallet: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,32 +95,40 @@ impl TradeMonitor {
     async fn fetch_trades_from_data_api(&self) -> Result<Vec<Trade>> {
         let start_seconds = (self.last_processed_timestamp_ms / 1000) + 1;
         let url = "https://data-api.polymarket.com/activity";
-
-        let resp = self
-            .client
-            .get(url)
-            .query(&[
-                ("user", self.config.target_wallet.to_lowercase()),
-                ("type", "TRADE".to_owned()),
-                ("limit", "100".to_owned()),
-                ("sortBy", "TIMESTAMP".to_owned()),
-                ("sortDirection", "DESC".to_owned()),
-                ("start", start_seconds.to_string()),
-            ])
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            warn!("Data API returned {}", resp.status());
-            return Ok(Vec::new());
+ 
+        let mut all_trades = Vec::new();
+ 
+        for wallet in &self.config.target_wallets {
+            let resp = self
+                .client
+                .get(url)
+                .query(&[
+                    ("user", wallet.to_lowercase()),
+                    ("type", "TRADE".to_owned()),
+                    ("limit", "50".to_owned()),
+                    ("sortBy", "TIMESTAMP".to_owned()),
+                    ("sortDirection", "DESC".to_owned()),
+                    ("start", start_seconds.to_string()),
+                ])
+                .send()
+                .await?;
+ 
+            if !resp.status().is_success() {
+                warn!("Data API for {} returned {}", wallet, resp.status());
+                continue;
+            }
+ 
+            let rows: Vec<DataApiTrade> = resp.json().await.unwrap_or_default();
+            for row in rows {
+                all_trades.push(parse_data_trade(row, wallet.clone()));
+            }
         }
-
-        let rows: Vec<DataApiTrade> = resp.json().await.unwrap_or_default();
-        Ok(rows.into_iter().map(parse_data_trade).collect())
+ 
+        Ok(all_trades)
     }
 }
-
-fn parse_data_trade(api: DataApiTrade) -> Trade {
+ 
+fn parse_data_trade(api: DataApiTrade, original_target_wallet: String) -> Trade {
     let tx_hash = api
         .transaction_hash
         .or(api.id)
@@ -129,9 +138,9 @@ fn parse_data_trade(api: DataApiTrade) -> Trade {
         .outcome
         .unwrap_or_else(|| "UNKNOWN".to_owned())
         .to_uppercase();
-
+ 
     let size_str = api.usdc_size.or(api.size).unwrap_or_else(|| "0".to_owned());
-
+ 
     Trade {
         tx_hash,
         timestamp_ms: api.timestamp * 1000,
@@ -141,5 +150,6 @@ fn parse_data_trade(api: DataApiTrade) -> Trade {
         price: api.price.parse().unwrap_or(0.0),
         size_usdc: size_str.parse().unwrap_or(0.0),
         outcome,
+        original_target_wallet,
     }
 }

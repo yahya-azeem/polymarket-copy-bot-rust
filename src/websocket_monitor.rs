@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -44,7 +45,7 @@ impl WebSocketMonitor {
         let (stream, _) = connect_async(url).await?;
         let (_, mut read) = stream.split();
         let (tx, rx) = mpsc::channel::<Trade>(1024);
-        let target = self.config.target_wallet.to_lowercase();
+        let targets: HashSet<String> = self.config.target_wallets.iter().map(|s| s.to_lowercase()).collect();
 
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {
@@ -62,19 +63,26 @@ impl WebSocketMonitor {
                             continue;
                         }
 
-                        let maker_ok = event
-                            .maker
-                            .as_ref()
-                            .map(|v| v.to_lowercase() == target)
-                            .unwrap_or(false);
-                        let taker_ok = event
-                            .taker
-                            .as_ref()
-                            .map(|v| v.to_lowercase() == target)
-                            .unwrap_or(false);
-                        if !maker_ok && !taker_ok {
+                        let m_addr = event.maker.as_ref().map(|v| v.to_lowercase());
+                        let t_addr = event.taker.as_ref().map(|v| v.to_lowercase());
+ 
+                        let matched_wallet = if let Some(addr) = m_addr {
+                            if targets.contains(&addr) { Some(addr) } else { None }
+                        } else {
+                            None
+                        };
+ 
+                        let matched_wallet = matched_wallet.or_else(|| {
+                            if let Some(addr) = t_addr {
+                                if targets.contains(&addr) { Some(addr) } else { None }
+                            } else {
+                                None
+                            }
+                        });
+ 
+                        let Some(original_target_wallet) = matched_wallet else {
                             continue;
-                        }
+                        };
 
                         let ts = event.timestamp.unwrap_or_else(now_ms);
                         let ts = if ts < 1_000_000_000_000 { ts * 1000 } else { ts };
@@ -90,6 +98,7 @@ impl WebSocketMonitor {
                                 .outcome
                                 .unwrap_or_else(|| "UNKNOWN".to_owned())
                                 .to_uppercase(),
+                            original_target_wallet,
                         };
                         if tx.send(trade).await.is_err() {
                             break;

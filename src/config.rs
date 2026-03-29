@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub target_wallet: String,
+    pub target_wallets: Vec<String>,
     pub private_key: String,
     pub rpc_url: String,
     pub polymarket_geo_token: Option<String>,
@@ -11,6 +11,8 @@ pub struct Config {
     pub risk: RiskConfig,
     pub run: RunConfig,
     pub monitoring: MonitoringConfig,
+    pub simulation_mode: bool,
+    pub polysimulator_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,8 @@ pub struct TradingConfig {
     pub use_sizing_model: bool,
     pub sizing_multiplier: f64,
     pub target_balance_override: Option<f64>,
+    pub max_percent_of_balance: f64,
+    pub prefer_literal_whale_size: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,9 +52,9 @@ pub struct MonitoringConfig {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let _ = dotenvy::dotenv();
+        let target_wallets = parse_csv(&env("TARGET_WALLETS", &env("TARGET_WALLET", "")));
         Ok(Self {
-            target_wallet: env("TARGET_WALLET", ""),
+            target_wallets,
             private_key: env("PRIVATE_KEY", ""),
             rpc_url: env("RPC_URL", "https://polygon-rpc.com"),
             polymarket_geo_token: optional_env("POLYMARKET_GEO_TOKEN"),
@@ -66,6 +70,8 @@ impl Config {
                 sizing_multiplier: env("SIZING_MULTIPLIER", "2.0").parse()?,
                 target_balance_override: optional_env("TARGET_BALANCE_USDC")
                     .and_then(|v| v.parse::<f64>().ok()),
+                max_percent_of_balance: env("MAX_PERCENT_OF_BALANCE", "0.10").parse()?,
+                prefer_literal_whale_size: env("PREFER_LITERAL_WHALE_SIZE", "true").to_lowercase() != "false",
             },
             risk: RiskConfig {
                 max_session_notional: env("MAX_SESSION_NOTIONAL", "0").parse()?,
@@ -83,15 +89,20 @@ impl Config {
                 ws_asset_ids: parse_csv(&env("WS_ASSET_IDS", "")),
                 ws_market_ids: parse_csv(&env("WS_MARKET_IDS", "")),
             },
+            simulation_mode: env("SIMULATION_MODE", "false").to_lowercase() == "true",
+            polysimulator_api_key: optional_env("POLYSIMULATOR_API_KEY"),
         })
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.target_wallet.is_empty() {
-            bail!("Missing required config: TARGET_WALLET");
+        if self.target_wallets.is_empty() {
+            bail!("Missing required config: TARGET_WALLETS (or TARGET_WALLET)");
         }
-        if self.private_key.is_empty() {
-            bail!("Missing required config: PRIVATE_KEY");
+        if self.private_key.is_empty() && !self.simulation_mode {
+            bail!("Missing required config: PRIVATE_KEY (Required when SIMULATION_MODE=false)");
+        }
+        if self.simulation_mode && self.polysimulator_api_key.is_none() {
+            bail!("Missing required config: POLYSIMULATOR_API_KEY (Required when SIMULATION_MODE=true)");
         }
         Ok(())
     }
