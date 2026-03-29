@@ -10,6 +10,8 @@
 - Position tracking and risk caps (session/per-market notional)
 - Authenticated CLOB order placement with `polymarket-client-sdk`
 - Balance/allowance refresh via CLOB authenticated endpoint
+- Sizing model:
+  `your_balance / target_balance * target_position_size * SIZING_MULTIPLIER`
 
 ## Setup
 

@@ -21,6 +21,9 @@ pub struct TradingConfig {
     pub min_trade_size: f64,
     pub slippage_tolerance: f64,
     pub order_type: String,
+    pub use_sizing_model: bool,
+    pub sizing_multiplier: f64,
+    pub target_balance_override: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +62,10 @@ impl Config {
                 min_trade_size: env("MIN_TRADE_SIZE", "1").parse()?,
                 slippage_tolerance: env("SLIPPAGE_TOLERANCE", "0.02").parse()?,
                 order_type: env("ORDER_TYPE", "FOK").to_uppercase(),
+                use_sizing_model: env("USE_SIZING_MODEL", "true").to_lowercase() != "false",
+                sizing_multiplier: env("SIZING_MULTIPLIER", "2.0").parse()?,
+                target_balance_override: optional_env("TARGET_BALANCE_USDC")
+                    .and_then(|v| v.parse::<f64>().ok()),
             },
             risk: RiskConfig {
                 max_session_notional: env("MAX_SESSION_NOTIONAL", "0").parse()?,

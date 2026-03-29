@@ -85,9 +85,19 @@ impl TradeExecutor {
         Ok(())
     }
 
-    pub fn calculate_copy_size(&self, original_size: f64) -> f64 {
+    pub async fn calculate_copy_size(&self, original_size: f64) -> f64 {
         let t = &self.config.trading;
-        let mut size = original_size * t.position_multiplier;
+        let mut size = if t.use_sizing_model {
+            match self.compute_sizing_model_notional(original_size).await {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!("Sizing model unavailable, falling back to POSITION_MULTIPLIER: {err}");
+                    original_size * t.position_multiplier
+                }
+            }
+        } else {
+            original_size * t.position_multiplier
+        };
         size = size.min(t.max_trade_size);
         let market_min = if t.order_type == "FOK" || t.order_type == "FAK" {
             1.0
@@ -103,12 +113,93 @@ impl TradeExecutor {
         (shares * 10_000.0).round() / 10_000.0
     }
 
+    async fn compute_sizing_model_notional(&self, target_position_size: f64) -> Result<f64> {
+        let your_balance = self.get_your_balance_usdc().await?;
+        let target_balance = if let Some(v) = self.config.trading.target_balance_override {
+            v
+        } else {
+            self.get_target_balance_usdc().await?
+        };
+
+        if your_balance <= 0.0 {
+            bail!("your_balance is <= 0");
+        }
+        if target_balance <= 0.0 {
+            bail!("target_balance is <= 0");
+        }
+
+        let ratio = your_balance / target_balance;
+        let mirrored = ratio * target_position_size * self.config.trading.sizing_multiplier;
+        info!(
+            "Sizing model | your_balance={} target_balance={} ratio={} target_size={} multiplier={} mirrored={}",
+            your_balance,
+            target_balance,
+            ratio,
+            target_position_size,
+            self.config.trading.sizing_multiplier,
+            mirrored
+        );
+        Ok(mirrored)
+    }
+
+    async fn get_your_balance_usdc(&self) -> Result<f64> {
+        let clob = self
+            .clob
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("trader not initialized"))?;
+        let bal = clob
+            .balance_allowance(
+                BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Collateral)
+                    .signature_type(SignatureType::Eoa)
+                    .build(),
+            )
+            .await?;
+        Ok(bal.balance.to_string().parse::<f64>().unwrap_or(0.0))
+    }
+
+    async fn get_target_balance_usdc(&self) -> Result<f64> {
+        let url = "https://data-api.polymarket.com/value";
+        let resp = self
+            .http
+            .get(url)
+            .query(&[("user", self.config.target_wallet.to_lowercase())])
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            bail!("target value endpoint returned {}", resp.status());
+        }
+
+        let value: Value = resp.json().await?;
+        if let Some(arr) = value.as_array() {
+            for row in arr {
+                if let Some(v) = row.get("value").and_then(to_f64) {
+                    return Ok(v);
+                }
+            }
+        }
+        if let Some(v) = value.get("value").and_then(to_f64) {
+            return Ok(v);
+        }
+        if let Some(v) = to_f64(&value) {
+            return Ok(v);
+        }
+        bail!("unable to parse target wallet balance from value endpoint");
+    }
+
     pub async fn execute_copy_trade(
         &self,
         original_trade: &Trade,
         copy_notional_override: Option<f64>,
     ) -> Result<CopyExecutionResult> {
-        let copy_notional = copy_notional_override.unwrap_or_else(|| self.calculate_copy_size(original_trade.size_usdc));
+        let copy_notional = if let Some(v) = copy_notional_override {
+            v
+        } else {
+            self.calculate_copy_size(original_trade.size_usdc).await
+        };
         self.validate_balance_or_shares(&original_trade.side, copy_notional, &original_trade.token_id)
             .await?;
 
@@ -294,4 +385,14 @@ impl TradeExecutor {
             )
         })
     }
+}
+
+fn to_f64(v: &Value) -> Option<f64> {
+    if let Some(n) = v.as_f64() {
+        return Some(n);
+    }
+    if let Some(s) = v.as_str() {
+        return s.parse::<f64>().ok();
+    }
+    None
 }

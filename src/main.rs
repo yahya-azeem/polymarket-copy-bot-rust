@@ -140,7 +140,7 @@ impl PolymarketCopyBot {
             return;
         }
 
-        let copy_notional = self.executor.calculate_copy_size(trade.size_usdc);
+        let copy_notional = self.executor.calculate_copy_size(trade.size_usdc).await;
 
         if trade.side == "SELL" {
             let needed_shares = self
