@@ -1,98 +1,89 @@
-# Polymarket Copy Trading Bot (Rust)
- 
-A high-performance **Polymarket copy bot** written in Rust for copy trading on Polymarket prediction markets. It watches a list of target wallets and automatically copies `BUY` and `SELL` trades with sophisticated sizing, risk management, and 24/7 operation capabilities.
- 
-## 🚀 Key Features
- 
-### 1. Dual-Path Monitoring
-- **REST Polling**: Continuously polls the Polymarket Data API for the latest trades from a list of **target wallets**.
-- **WebSocket Ingestion**: Optional WebSocket subscription to the Polymarket CLOB for near-instant (low-latency) trade detection across all monitored wallets.
- 
-### 2. Intelligent Trade Execution
-- **Order Types**: Supports `LIMIT`, `FOK` (Fill-or-Kill), and `FAK` (Fill-and-Kill) orders.
-- **Slippage Control**: Configurable slippage tolerance to ensure you don't overpay for entries or under-receive for exits.
-- **Automatic Approvals**: Checks and maintains necessary token approvals for `USDC.e` and `CTF` contracts.
- 
-### 3. Budget-Aware Adaptive Sizing (Enabled by Default)
-The bot uses an benchmark-driven sizing model to mirror target conviction while protecting your wallet:
-- **Whale Awareness**: If the target's balance is much larger than yours (Whale Case), the bot will attempt to mirror their **literal dollar amounts** instead of a tiny proportional fraction.
-- **Safety Wall**: High-risk trades are automatically capped at a configurable percentage of **your current wallet balance** (Default: 10%).
-- **Calculation**: `Final Size = min(Literal Amount, Your Balance * MAX_PERCENT_OF_BALANCE, MAX_TRADE_SIZE)`
-- **Conviction Mirroring**: Mirrors the proportional size if the target bets a significant portion of their own funds.
- 
-### 4. Robust Risk Management
-- **Max Trade Size**: Caps any single trade to a specific USDC amount.
-- **Session Notional Cap**: Maximum total volume allowed in a single session.
-- **Market Notional Cap**: Maximum exposure allowed per individual market.
-- **Copy Sells**: Toggleable ability to copy `SELL` trades (requires holding the position).
- 
-### 5. 🧪 Simulation Mode (Paper Trading)
-- Support for **PolySimulator.com** to test your bot without real funds.
-- Set `SIMULATION_MODE=true` and provide a `POLYSIMULATOR_API_KEY` to trade against a paper balance mirroring the real CLOB mid-prices.
- 
-### 6. 24/7 Windows Daemon
-- Includes a dedicated PowerShell setup script (`setup-daemon.ps1`) to:
-  - Disable Windows sleep/hibernation when the laptop lid is closed.
-  - Provide instructions for running as a permanent Windows Service.
- 
+# 🚀 Polymarket Copytrade Bot (Rust Edition)
+
+A high-performance, asynchronous trading engine designed to mirror "Whale" activity on Polymarket with precision and safety. Built for scalability, this bot leverages a modular Rust architecture to provide institutional-grade execution for retail traders.
+
+## 🌟 Key Features
+
+### 1. **Adaptive Scalability**
+- **3-Tier Risk Management**: Automatically switches strategy based on your balance.
+    - **Tier 1 (Protection)**: Tight 20% TP / 10% SL for small accounts (<$100).
+    - **Tier 2 (Growth)**: Balanced 50% TP / 25% SL for medium accounts ($100-$1,000).
+    - **Tier 3 (Mirror)**: Pure whale-mimicry for large accounts (>$1,000).
+- **Proportional Mirroring**: Automatically scales trade sizes relative to the whale's total bankroll vs. yours.
+
+### 2. **Professional Execution Engine**
+- **Parallel Asynchronous Core**: Processes multiple whale movements simultaneously using `tokio` tasks. No queuing, no lag.
+- **Auto-Execution Mode**: Dynamically chooses between `LIMIT` and `FOK` (Fill-or-Kill) orders based on balance and market urgency.
+- **Precision Tick Handling**: Enforces Polymarket's 0.001 tick size to prevent validation errors.
+
+### 3. **Smart Discovery**
+- **Polywhaler Leaderboard Addon**: Optional auto-follow feature that scrapes the top 10 traders from `polywhaler.io` in real-time.
+- **WebSocket Price Engine**: Reacts instantly to price changes for active positions to trigger TP/SL profit taking.
+
+### 4. **Institutional Safety**
+- **Daily Drawdown Protection**: Monitors total equity and blocks new buys if a 20% loss is hit within 24 hours.
+- **Geoblock Bypass**: Built-in support for geographic tokens to ensure uninterrupted global access.
+- **Graceful Shutdown**: Safe `Ctrl+C` handling to ensure all system states are logged before exit.
+
 ---
- 
-## 🛠️ Setup & Installation
- 
-### Prerequisites
-- [Rust](https://rustup.rs/) (latest stable)
-- A Polygon wallet with `POL` (for gas) and `USDC.e` (collateral)
-- A Polymarket account associated with your wallet
- 
-### Steps
-1. **Clone & Configure**:
-   ```bash
-   cp .env.example .env
-   ```
-2. **Fill Required Variables** in `.env`:
-   - `TARGET_WALLETS`: The wallet addresses to follow (comma-separated).
-   - `PRIVATE_KEY`: Your wallet's private key (only if `SIMULATION_MODE=false`).
-   - `RPC_URL`: Your Polygon RPC URL (QuickNode recommended).
-   - `SIMULATION_MODE`: Set to `true` for paper trading.
-   - `POLYSIMULATOR_API_KEY`: Required if `SIMULATION_MODE=true`.
- 
-3. **Build**:
-   ```bash
-   cargo build --release
-   ```
- 
-4. **Power Configuration (Windows Laptops)**:
-   Run PowerShell as Administrator:
-   ```powershell
-   .\setup-daemon.ps1
-   ```
- 
-5. **Run**:
-   ```bash
-   ./target/release/polymarket-copy-bot-rust
-   ```
- 
+
+## 🏗️ Architecture
+
+```mermaid
+graph TD
+    A[main.rs] --> B[bot.rs: Orchestrator]
+    B --> C[monitor.rs: Discovery]
+    B --> D[trader.rs: Strategy]
+    B --> E[websocket_monitor.rs: Live Prices]
+    D --> F[clob.rs: Exchange Interface]
+    C --> G[leaderboard.rs: Whale Scraper]
+    D --> H[risk_manager.rs: Safety]
+```
+
+- **`src/bot.rs`**: The central brain managing state and lifecycle.
+- **`src/trader.rs`**: Implements the 3-tier strategy and sizing models.
+- **`src/types.rs`**: Centralized data structures for cross-module reliability.
+- **`src/risk_manager.rs`**: Enforces notional caps and daily loss limits.
+
 ---
- 
-## ⚙️ Configuration (.env)
- 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `SIMULATION_MODE` | Enable Paper Trading via PolySimulator | `false` |
-| `POLYSIMULATOR_API_KEY` | API Key from PolySimulator.com | `` |
-| `USE_SIZING_MODEL` | Enable proportional balance-based sizing | `true` |
-| `SIZING_MULTIPLIER` | Multiplier for the sizing model output | `2.0` |
-| `MAX_TRADE_SIZE` | Hard cap on any single order size (USDC) | `100` |
-| `COPY_SELLS` | Whether to copy SELL orders | `true` |
-| `ORDER_TYPE` | `LIMIT`, `FOK`, or `FAK` | `FOK` |
-| `POLL_INTERVAL` | Milliseconds between REST poll checks | `2000` |
- 
+
+## 🛠️ Setup & Configuration
+
+1. **Clone the repo**:
+   ```bash
+   git clone https://github.com/yahya-azeem/polymarket-copy-bot-rust.git
+   cd polymarket-copy-bot-rust
+   ```
+
+2. **Configure `.env`**:
+   Copy `.env.example` to `.env` and fill in your credentials.
+   ```bash
+   # Core Credentials
+   PRIVATE_KEY=your_private_key
+   POLYMARKET_SIGNATURE_TYPE=GNOSIS_SAFE # or EOA / PROXY
+   
+   # Discovery Settings
+   TARGET_WALLETS=0x123...,0x456...
+   USE_POLYWHALER_LEADERBOARD=true
+   
+   # Execution
+   ORDER_TYPE=AUTO
+   ```
+
+3. **Build & Run**:
+   ```bash
+   cargo run --release
+   ```
+
 ---
- 
-## 🛡️ Security & Best Practices
-- **Dedicated Wallet**: Use a dedicated wallet with only the funds you intend to trade.
-- **Never Share Private Keys**: Ensure your `.env` file is never committed or shared.
-- **Dry Run**: Start with `SIMULATION_MODE=true` to verify behavior before switching to real funds.
- 
+
+## 📊 Monitoring
+The bot provides a premium, timestamped console output:
+- `NEW TRADE`: Prominent alerts when a whale moves.
+- `🔍 Monitoring`: Heartbeat status of active market scans.
+- `✅ Copied`: Detailed fill reports and updated PnL.
+
+---
+
 ## ⚖️ Disclaimer
-Trading carries risk. Use this software at your own risk. The authors are not responsible for financial losses.
+Trading prediction markets involves significant risk. This software is provided "as is" without warranty. Always test with `SIMULATION_MODE=true` before deploying capital.

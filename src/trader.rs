@@ -499,7 +499,7 @@ impl TradeExecutor {
         }
         let px_f = px.to_string().parse::<f64>().unwrap_or(original_trade.price);
         let px_f = px_f.clamp(0.01, 0.99);
-        let price = Decimal::from_str(&format!("{:.4}", px_f))?;
+        let price = Decimal::from_str(&format!("{:.3}", px_f))?;
         let copy_shares = self.calculate_shares_for_notional(copy_notional, px_f);
 
         let side = if original_trade.side == "BUY" {
