@@ -193,7 +193,7 @@ impl TradeExecutor {
 
     pub fn calculate_shares_for_notional(&self, notional: f64, price: f64) -> f64 {
         let shares = if price > 0.0 { notional / price } else { 0.0 };
-        (shares * 10_000.0).round() / 10_000.0
+        (shares * 100.0).round() / 100.0
     }
 
     async fn compute_sizing_model_notional(
