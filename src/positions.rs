@@ -2,17 +2,9 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::monitor::Trade;
+use crate::types::{PositionState, Trade};
 
-#[derive(Debug, Clone, Default)]
-pub struct PositionState {
-    pub token_id: String,
-    pub market: String,
-    pub outcome: String,
-    pub shares: f64,
-    pub notional: f64,
-    pub avg_price: f64,
-}
+
 
 #[derive(Debug, Default)]
 pub struct PositionTracker {
@@ -33,10 +25,13 @@ impl PositionTracker {
 
             let market = get_string(pos, &["condition_id", "conditionId", "market", "market_id"])
                 .unwrap_or_default();
-            let outcome = get_string(pos, &["outcome", "side"]).unwrap_or_else(|| "YES".to_owned());
+            let outcome =
+                get_string(pos, &["outcome", "side"]).unwrap_or_else(|| "YES".to_owned());
             let shares = get_number(pos, &["size", "quantity", "shares", "balance", "position"]);
-            let notional = get_number(pos, &["usdcValue", "notional", "usdc", "value", "collateral"]);
-            let avg_price = get_number(pos, &["avgPrice", "averagePrice", "entryPrice", "price"]);
+            let notional =
+                get_number(pos, &["usdcValue", "notional", "usdc", "value", "collateral"]);
+            let avg_price =
+                get_number(pos, &["avgPrice", "averagePrice", "entryPrice", "price"]);
             let avg_price = if avg_price > 0.0 {
                 avg_price
             } else if shares > 0.0 {
@@ -45,6 +40,9 @@ impl PositionTracker {
                 0.0
             };
 
+            // Cost basis = shares * avg_price (what was paid to acquire)
+            let cost_basis = shares * avg_price;
+
             self.positions.insert(
                 token_id.clone(),
                 PositionState {
@@ -52,7 +50,7 @@ impl PositionTracker {
                     market,
                     outcome,
                     shares: shares.max(0.0),
-                    notional: notional.max(0.0),
+                    cost_basis: cost_basis.max(0.0),
                     avg_price,
                 },
             );
@@ -79,38 +77,80 @@ impl PositionTracker {
                 market: trade.market.clone(),
                 outcome: trade.outcome.clone(),
                 shares: 0.0,
-                notional: 0.0,
+                cost_basis: 0.0,
                 avg_price: price,
             });
 
-        let sign = if side == "BUY" { 1.0 } else { -1.0 };
-        let next_shares = existing.shares + (shares * sign);
-        let next_notional = existing.notional + (notional * sign);
-        let next_avg = if next_shares > 0.0 {
-            (next_notional / next_shares).abs()
-        } else {
-            0.0
-        };
+        if side == "BUY" {
+            // Add shares, add cost basis
+            let next_shares = existing.shares + shares;
+            let next_cost = existing.cost_basis + notional;
+            let next_avg = if next_shares > 0.0 {
+                next_cost / next_shares
+            } else {
+                0.0
+            };
 
-        self.positions.insert(
-            trade.token_id.clone(),
-            PositionState {
-                token_id: trade.token_id.clone(),
-                market: trade.market.clone(),
-                outcome: trade.outcome.clone(),
-                shares: next_shares.max(0.0),
-                notional: next_notional.max(0.0),
-                avg_price: next_avg,
-            },
-        );
+            self.positions.insert(
+                trade.token_id.clone(),
+                PositionState {
+                    token_id: trade.token_id.clone(),
+                    market: trade.market.clone(),
+                    outcome: trade.outcome.clone(),
+                    shares: next_shares,
+                    cost_basis: next_cost,
+                    avg_price: next_avg,
+                },
+            );
+        } else {
+            // SELL: reduce shares, reduce cost basis proportionally (Bug #8 fix)
+            let next_shares = (existing.shares - shares).max(0.0);
+            // Reduce cost basis proportionally to shares sold
+            let fraction_remaining = if existing.shares > 0.0 {
+                next_shares / existing.shares
+            } else {
+                0.0
+            };
+            let next_cost = existing.cost_basis * fraction_remaining;
+            let next_avg = if next_shares > 0.0 {
+                next_cost / next_shares
+            } else {
+                0.0
+            };
+
+            self.positions.insert(
+                trade.token_id.clone(),
+                PositionState {
+                    token_id: trade.token_id.clone(),
+                    market: trade.market.clone(),
+                    outcome: trade.outcome.clone(),
+                    shares: next_shares,
+                    cost_basis: next_cost,
+                    avg_price: next_avg,
+                },
+            );
+        }
     }
 
     pub fn get_notional(&self, token_id: &str) -> f64 {
-        self.positions.get(token_id).map(|p| p.notional).unwrap_or(0.0)
+        self.positions
+            .get(token_id)
+            .map(|p| p.cost_basis)
+            .unwrap_or(0.0)
     }
 
     pub fn get_position(&self, token_id: &str) -> Option<&PositionState> {
         self.positions.get(token_id)
+    }
+
+    pub fn get_all(&self) -> Vec<PositionState> {
+        self.positions.values().cloned().collect()
+    }
+
+    /// Returns all tracked token IDs (for seeding WebSocket subscriptions)
+    #[allow(dead_code)]
+    pub fn all_token_ids(&self) -> Vec<String> {
+        self.positions.keys().cloned().collect()
     }
 }
 
