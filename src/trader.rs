@@ -670,21 +670,24 @@ impl TradeExecutor {
                 .unwrap_or_default());
         }
 
-        let signer_guard = self.signer.read().await;
-        let addr = signer_guard
-            .as_ref()
-            .map(|s| s.address().to_string().to_lowercase())
-            .unwrap_or_default();
-        if addr.is_empty() {
+        let addr = self.get_address().await;
+        let addr_clean = addr.trim_matches('"').to_lowercase();
+        if addr_clean.is_empty() || addr_clean == "simulation/none" {
             return Ok(Vec::new());
         }
 
+        self.get_positions_for_user(&addr_clean).await
+    }
+
+    pub async fn get_positions_for_user(&self, addr: &str) -> Result<Vec<Value>> {
+        let addr_clean = addr.trim_matches('"').to_lowercase();
         let resp = self
             .http
             .get(DATA_API_POSITIONS)
-            .query(&[("user", addr), ("limit", "500".to_owned())])
+            .query(&[("user", addr_clean), ("limit", "500".to_owned())])
             .send()
             .await?;
+            
         if !resp.status().is_success() {
             return Ok(Vec::new());
         }

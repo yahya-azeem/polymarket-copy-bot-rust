@@ -257,6 +257,10 @@ impl PolymarketCopyBot {
         self.ws_monitor = Some(ws);
         
         info!("Monitor initialized at {}", current_time_ms());
+        
+        // Final Phase: Cross-reconcile with Whales (State Recovery)
+        self.sync_state_with_whales().await;
+        
         Ok(())
     }
 
@@ -349,9 +353,60 @@ impl PolymarketCopyBot {
             Ok(positions) => {
                 let mut tracker = self.state.positions.lock().await;
                 let (loaded, skipped) = tracker.load_from_data_api_positions(&positions);
-                info!("Positions reconciled: {} loaded, {} skipped", loaded, skipped);
+                if loaded > 0 {
+                    info!("Positions reconciled: {} loaded, {} skipped", loaded, skipped);
+                }
             }
             Err(e) => warn!("Positions reconciliation failed: {e}"),
+        }
+    }
+
+    async fn sync_state_with_whales(&self) {
+        info!("🕒 [t={}] Syncing portfolio state with whales (State Recovery)...", current_time_ms());
+        
+        // 1. Get your positions
+        let your_positions = match self.state.executor.get_positions().await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("State Recovery: Could not fetch your positions: {e}");
+                return;
+            },
+        };
+        
+        if your_positions.is_empty() {
+            info!("✅ Portfolio is clean. No existing positions to reconcile.");
+            return;
+        }
+
+        // 2. Get all whale positions (collect unique token IDs held by whales)
+        let mut whale_tokens = std::collections::HashSet::new();
+        for whale in &self.state.config.target_wallets {
+            if let Ok(positions) = self.state.executor.get_positions_for_user(whale).await {
+                for pos in positions {
+                    if let Some(token_id) = pos.get("asset").and_then(|v| v.as_str()) {
+                        whale_tokens.insert(token_id.to_string());
+                    }
+                }
+            }
+        }
+
+        // 3. Identify abandoned positions
+        let mut abandoned_count = 0;
+        for pos in your_positions {
+            let token_id = pos.get("asset").and_then(|v| v.as_str()).unwrap_or("");
+            let size = pos.get("size").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            
+            if size > 0.0 && !whale_tokens.contains(token_id) {
+                abandoned_count += 1;
+                warn!("⚠️ ABANDONED POSITION: Whales have exited {}, but you still hold it.", token_id);
+                info!("💡 TIP: If you want the bot to automatically exit these, you can enable 'AUTO_EXIT_ABANDONED=true' (Coming soon).");
+            }
+        }
+        
+        if abandoned_count == 0 {
+            info!("✅ State Recovery complete: All local positions are currently held by whales.");
+        } else {
+            warn!("🚨 State Recovery complete: {} abandoned positions found. Consider manual review/exit.", abandoned_count);
         }
     }
 }
