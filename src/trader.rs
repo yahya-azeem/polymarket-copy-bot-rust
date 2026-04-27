@@ -112,9 +112,9 @@ impl TradeExecutor {
                         if let Some(proxy) = profile.get("proxyWallet").and_then(|v| v.as_str()) {
                             if !proxy.is_empty() && proxy != "0x0000000000000000000000000000000000000000" {
                                 info!("🎯 AUTO-DETECTED Gnosis Safe Proxy: {}", proxy);
-                                final_sig_type = SignatureType::GnosisSafe;
+                                final_sig_type = SignatureType::Proxy;
                                 final_proxy = Some(Address::from_str(proxy.trim())?);
-                                self.detected_sig_type.store(SIG_TYPE_GNOSIS_SAFE, Ordering::Relaxed);
+                                self.detected_sig_type.store(SIG_TYPE_PROXY, Ordering::Relaxed);
                             }
                         }
                     }
