@@ -368,6 +368,7 @@ impl TradeExecutor {
                 SignatureType::Eoa => (eoa_bal_val, SIG_TYPE_EOA),
                 SignatureType::Proxy => (proxy_bal_val, SIG_TYPE_PROXY),
                 SignatureType::GnosisSafe => (safe_bal_val, SIG_TYPE_GNOSIS_SAFE),
+                _ => (eoa_bal_val, SIG_TYPE_EOA), // Catch-all for SDK updates
             }
         };
 
