@@ -529,12 +529,10 @@ impl TradeExecutor {
         let px_f = px_f.clamp(0.01, 0.99);
 
         // MARKET-AWARE ROUNDING (Tick Size Fix)
-        let tick_size = self.get_market_tick_size(&original_trade.token_id).await;
-        let price = if tick_size >= 0.01 {
-            Decimal::from_str(&format!("{:.2}", px_f))?
-        } else {
-            Decimal::from_str(&format!("{:.3}", px_f))?
-        };
+        // We infer the required precision from the Order Book's best price
+        let book_precision = get_precision(best_f).max(2).min(4);
+        let price_str = format!("{:.*}", book_precision, px_f);
+        let price = Decimal::from_str(&price_str)?;
 
         let copy_shares = self.calculate_shares_for_notional(copy_notional, px_f);
 
@@ -839,21 +837,6 @@ impl TradeExecutor {
         .map_err(|e| anyhow!("failed to fetch order book: {e}"))
     }
 
-    pub async fn get_market_tick_size(&self, token_id: &str) -> f64 {
-        let url = format!("https://clob.polymarket.com/markets/{}", token_id);
-        match self.http.get(url).send().await {
-            Ok(resp) => {
-                if let Ok(data) = resp.json::<Value>().await {
-                    if let Some(tick) = data.get("minimum_tick_size").and_then(|v| v.as_str()) {
-                        return tick.parse::<f64>().unwrap_or(0.001);
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-        0.001 // fallback to standard 3 decimals
-    }
-
     pub async fn cancel_stale_orders(&self) -> Result<usize> {
         if self.config.simulation_mode {
             return Ok(0);
@@ -1097,6 +1080,16 @@ impl TradeExecutor {
             _ => SignatureType::Eoa,
         }
     }
+}
+
+fn get_precision(val: f64) -> usize {
+    let s = format!("{:.6}", val);
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() < 2 {
+        return 0;
+    }
+    let decimals = parts[1].trim_end_matches('0');
+    decimals.len()
 }
 
 fn to_f64(v: &Value) -> Option<f64> {
