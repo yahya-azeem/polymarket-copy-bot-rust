@@ -15,7 +15,7 @@ use crate::utils::{current_time_ms, BoundedDedup};
 use crate::websocket_monitor::WebSocketMonitor;
 
 const MAX_PROCESSED_TRADES: usize = 10_000;
-const RECONCILE_INTERVAL_MS: i64 = 300_000; // 5 minutes
+const RECONCILE_INTERVAL_MS: i64 = 120_000; // 2 minutes (faster sync)
 const TRADE_COOLDOWN_MS: i64 = 5_000; // 5 seconds between trades
 
 pub struct BotState {

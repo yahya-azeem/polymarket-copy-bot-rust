@@ -86,7 +86,7 @@ impl Config {
                 take_profit_percent: optional_env("TAKE_PROFIT_PERCENT").and_then(|v| v.parse().ok()),
                 stop_loss_percent: optional_env("STOP_LOSS_PERCENT").and_then(|v| v.parse().ok()),
                 min_whale_size_usdc: env("MIN_WHALE_SIZE_USDC", "0").parse()?,
-                auto_market_threshold: env("AUTO_MARKET_THRESHOLD", "100").parse()?,
+                auto_market_threshold: env("AUTO_MARKET_THRESHOLD", "5").parse()?,
             },
             risk: RiskConfig {
                 max_session_notional: env("MAX_SESSION_NOTIONAL", "1000000").parse()?,
