@@ -121,8 +121,8 @@ impl TradeExecutor {
                 }
             }
             
-            if final_sig_type != SignatureType::GnosisSafe {
-                // If no proxy found, fall back to EOA
+            if final_sig_type == SignatureType::Eoa {
+                // If no proxy found, fall back to EOA explicitly
                 self.detected_sig_type.store(SIG_TYPE_EOA, Ordering::Relaxed);
                 final_sig_type = SignatureType::Eoa;
             }
