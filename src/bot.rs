@@ -416,11 +416,13 @@ impl PolymarketCopyBot {
 
         // Perform Cache Cleanup
         if !whales_to_remove.is_empty() {
+            let count = whales_to_remove.len();
             let mut cache = self.state.whale_cache.lock().await;
             for w in whales_to_remove {
-                info!("🧹 Cache Cleanup: Removing whale {} (Inactive & no positions).", w);
+                debug!("🧹 Cache Cleanup: Removing whale {} (Inactive & no positions).", w);
                 cache.remove_whale(&w);
             }
+            info!("✅ Cache Maintenance: Removed {} inactive whales with no open positions.", count);
         }
 
         // 3. Identify abandoned positions (only if we actually hold positions)
