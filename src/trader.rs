@@ -13,6 +13,7 @@ use polymarket_client_sdk::clob::types::request::{
     OrdersRequest,
 };
 use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType, Order};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 const SIG_TYPE_AUTO: u8 = 0;
@@ -34,6 +35,9 @@ use crate::utils::current_time_ms;
 const DATA_API_POSITIONS: &str = "https://data-api.polymarket.com/positions";
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 const SIM_BASE: &str = "https://api.polysimulator.com/v1";
+
+const USDC_NATIVE: &str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
+const USDC_BRIDGED: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 type AuthClient = ClobClient<Authenticated<Normal>>;
 
@@ -347,42 +351,36 @@ impl TradeExecutor {
             .cloned()
             .ok_or_else(|| anyhow!("trader not initialized"))?;
 
-        let preferred_sig_type = self.get_signature_type();
-        let mut eoa_bal_val = 0.0;
-        let mut proxy_bal_val = 0.0;
-        let mut safe_bal_val = 0.0;
-        let mut data_api_val = 0.0;
-
-        // 🔍 Check EOA
-        if let Ok(bal) = clob.balance_allowance(BalanceAllowanceRequest::builder().asset_type(AssetType::Collateral).signature_type(SignatureType::Eoa).build()).await {
-            eoa_bal_val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
-        }
-
-        // 🔍 Check Proxy
-        if let Ok(bal) = clob.balance_allowance(BalanceAllowanceRequest::builder().asset_type(AssetType::Collateral).signature_type(SignatureType::Proxy).build()).await {
-            proxy_bal_val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
-        }
-
-        // 🔍 Check GnosisSafe
-        if let Ok(bal) = clob.balance_allowance(BalanceAllowanceRequest::builder().asset_type(AssetType::Collateral).signature_type(SignatureType::GnosisSafe).build()).await {
-            safe_bal_val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
-        }
-
-        // 🔍 Check Data API
-        let addr = self.get_address().await;
-        let addr_clean = addr.trim_matches('"').to_lowercase();
-        let url = "https://data-api.polymarket.com/value";
-        if let Ok(resp) = self.http.get(url).query(&[("user", &addr_clean)]).send().await {
-            if resp.status().is_success() {
-                if let Ok(value) = resp.json::<Value>().await {
-                    data_api_val = if let Some(arr) = value.as_array() {
-                        arr.get(0).and_then(|row| row.get("value")).and_then(to_f64)
-                    } else {
-                        value.get("value").and_then(to_f64).or_else(|| to_f64(&value))
-                    }.unwrap_or(0.0);
+        let mut total_bal = 0.0;
+        for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe] {
+            for token in [USDC_NATIVE, USDC_BRIDGED] {
+                let req = BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Collateral)
+                    .signature_type(sig)
+                    .token_id(token.to_string())
+                    .build();
+                if let Ok(bal) = clob.balance_allowance(req).await {
+                    let val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0);
+                    if val > total_bal {
+                        total_bal = val;
+                    }
                 }
             }
         }
+        Ok(total_bal)
+    }
+
+    pub async fn get_market_collateral(&self, market_id: &str) -> Result<String> {
+        let url = format!("https://gamma-api.polymarket.com/markets/{}", market_id);
+        let resp = self.http.get(url).send().await?;
+        if resp.status().is_success() {
+            let data: Value = resp.json().await?;
+            if let Some(token) = data.get("collateralAddress").and_then(|v| v.as_str()) {
+                return Ok(token.to_string());
+            }
+        }
+        Ok(USDC_NATIVE.to_string())
+    }
 
         debug!("💰 [DEBUG] Balances: EOA={:.2} | Proxy={:.2} | Safe={:.2} | DataAPI={:.2}", 
             eoa_bal_val, proxy_bal_val, safe_bal_val, data_api_val);
