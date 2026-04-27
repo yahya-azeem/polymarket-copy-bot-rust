@@ -342,22 +342,33 @@ impl TradeExecutor {
         debug!("💰 [DEBUG] Balances: EOA={:.2} | Proxy={:.2} | Safe={:.2} | DataAPI={:.2}", 
             eoa_bal_val, proxy_bal_val, safe_bal_val, data_api_val);
 
-        // Selection logic: Favor preferred, then any non-zero, then fallback to EOA
-        let (final_bal, detected) = if preferred_sig_type == SignatureType::Eoa {
-            (eoa_bal_val, SIG_TYPE_EOA)
-        } else if preferred_sig_type == SignatureType::Proxy && proxy_bal_val > 0.0 {
-            (proxy_bal_val, SIG_TYPE_PROXY)
-        } else if preferred_sig_type == SignatureType::GnosisSafe && safe_bal_val > 0.0 {
-            (safe_bal_val, SIG_TYPE_GNOSIS_SAFE)
+        // 🔍 Highest Balance Detection
+        let mut best_bal = eoa_bal_val;
+        let mut best_type = SIG_TYPE_EOA;
+
+        if proxy_bal_val > best_bal {
+            best_bal = proxy_bal_val;
+            best_type = SIG_TYPE_PROXY;
+        }
+        if safe_bal_val > best_bal {
+            best_bal = safe_bal_val;
+            best_type = SIG_TYPE_GNOSIS_SAFE;
+        }
+        if data_api_val > best_bal {
+            best_bal = data_api_val;
+            best_type = SIG_TYPE_GNOSIS_SAFE; // Data API balance usually implies Gnosis Safe
+        }
+
+        // 🎯 Selection logic
+        let (final_bal, detected) = if self.config.polymarket_signature_type == "AUTO" {
+            (best_bal, best_type)
         } else {
-            // Fallback chain (Detection)
-            if proxy_bal_val > 0.0 { (proxy_bal_val, SIG_TYPE_PROXY) }
-            else if safe_bal_val > 0.0 { (safe_bal_val, SIG_TYPE_GNOSIS_SAFE) }
-            else if data_api_val > 0.0 { 
-                // If DataAPI has funds, it's usually Safe for Magic/Gmail users
-                (data_api_val, SIG_TYPE_GNOSIS_SAFE) 
+            // Manual Override: Honor the .env setting
+            match preferred_sig_type {
+                SignatureType::Eoa => (eoa_bal_val, SIG_TYPE_EOA),
+                SignatureType::Proxy => (proxy_bal_val, SIG_TYPE_PROXY),
+                SignatureType::GnosisSafe => (safe_bal_val, SIG_TYPE_GNOSIS_SAFE),
             }
-            else { (eoa_bal_val, SIG_TYPE_EOA) }
         };
 
         if self.config.polymarket_signature_type == "AUTO" && self.detected_sig_type.load(Ordering::Relaxed) == SIG_TYPE_AUTO {
