@@ -114,9 +114,9 @@ impl TradeExecutor {
                         if let Some(proxy) = profile.get("proxyWallet").and_then(|v| v.as_str()) {
                             if !proxy.is_empty() && proxy != "0x0000000000000000000000000000000000000000" {
                                 info!("🎯 AUTO-DETECTED Gnosis Safe Proxy: {}", proxy);
-                                final_sig_type = SignatureType::GnosisSafe;
+                                final_sig_type = SignatureType::Proxy;
                                 final_proxy = Some(Address::from_str(proxy.trim())?);
-                                self.detected_sig_type.store(SIG_TYPE_GNOSIS_SAFE, Ordering::Relaxed);
+                                self.detected_sig_type.store(SIG_TYPE_PROXY, Ordering::Relaxed);
                             }
                         }
                     }
@@ -301,6 +301,12 @@ impl TradeExecutor {
 
         // Hard cap: NEVER exceed the whale's actual trade size
         let mut final_size = chosen.min(target_position_size);
+
+        // Minimum Trade Size Check ($1.00)
+        if final_size > 0.0 && final_size < 1.0 {
+            info!("Sizing Model: Size {:.2} is below minimum, bumping to $1.00", final_size);
+            final_size = 1.0;
+        }
 
         // Safety: also cap at X% of your own wallet balance
         let wallet_cap = your_balance * self.config.trading.max_percent_of_balance;
