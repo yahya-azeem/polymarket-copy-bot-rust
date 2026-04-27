@@ -102,7 +102,9 @@ impl TradeExecutor {
             .await
             .map_err(|e| anyhow!("failed to derive/create api key: {e}"))?;
 
+        let sig_type = self.get_signature_type();
         let mut auth = unauth
+            .clone()
             .authentication_builder(signer)
             .credentials(creds.clone())
             .signature_type(sig_type)
