@@ -125,6 +125,12 @@ impl TradeExecutor {
 
         // Geoblock check only at init (Bug #10 fix — no longer on every trade)
         self.check_geoblock().await?;
+
+        // 🔍 DISCOVERY: Run a balance check to auto-detect signature type BEFORE approvals
+        if self.config.polymarket_signature_type == "AUTO" {
+            let _ = self.get_your_balance_usdc().await;
+        }
+
         self.ensure_approvals().await?;
         Ok(())
     }
