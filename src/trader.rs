@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy::signers::local::PrivateKeySigner;
+use alloy::primitives::Address;
 use anyhow::{Result, anyhow, bail};
 use polymarket_client_sdk::POLYGON;
 use polymarket_client_sdk::auth::Credentials;
@@ -99,7 +100,7 @@ impl TradeExecutor {
 
         // 🔍 DISCOVERY: Auto-detect signature type using Gamma Profile API
         let mut final_sig_type = self.get_signature_type();
-        let mut final_proxy = None;
+        let mut final_proxy: Option<Address> = None;
 
         if self.config.polymarket_signature_type == "AUTO" {
             let addr = format!("{:?}", signer.address()).trim_matches('"').to_lowercase();
@@ -112,7 +113,7 @@ impl TradeExecutor {
                             if !proxy.is_empty() && proxy != "0x0000000000000000000000000000000000000000" {
                                 info!("🎯 AUTO-DETECTED Gnosis Safe Proxy: {}", proxy);
                                 final_sig_type = SignatureType::GnosisSafe;
-                                final_proxy = Some(proxy.parse()?);
+                                final_proxy = Some(Address::from_str(proxy.trim())?);
                                 self.detected_sig_type.store(SIG_TYPE_GNOSIS_SAFE, Ordering::Relaxed);
                             }
                         }
@@ -129,16 +130,21 @@ impl TradeExecutor {
 
         // Now initialize CLOB once with the correct settings
         let creds = unauth
-            .create_or_derive_api_key(signer, final_proxy)
+            .create_or_derive_api_key(signer, None) // Nonce is None
             .await
             .map_err(|e| anyhow!("failed to derive/create api key: {e}"))?;
 
-        let auth = unauth
+        let mut builder = unauth
             .authentication_builder(signer)
             .credentials(creds.clone())
-            .signature_type(final_sig_type)
-            .authenticate()
-            .await?;
+            .signature_type(final_sig_type);
+        
+        // If we have a detected proxy, use it as the funder (Safe address)
+        if let Some(proxy_addr) = final_proxy {
+            builder = builder.funder(proxy_addr);
+        }
+
+        let auth = builder.authenticate().await?;
 
         let _ = auth.api_keys().await?;
         info!("API credentials initialized ({:?}).", final_sig_type);
