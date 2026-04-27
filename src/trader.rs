@@ -12,7 +12,7 @@ use polymarket_client_sdk::clob::types::request::{
     BalanceAllowanceRequest, OrderBookSummaryRequest, UpdateBalanceAllowanceRequest,
     OrdersRequest,
 };
-use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType, Order};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 const SIG_TYPE_AUTO: u8 = 0;
@@ -46,6 +46,7 @@ pub struct TradeExecutor {
     _creds: Arc<RwLock<Option<Credentials>>>,
     http: Client,
     detected_sig_type: AtomicU8,
+    detected_proxy: Arc<RwLock<Option<Address>>>,
 }
 
 impl TradeExecutor {
@@ -79,6 +80,7 @@ impl TradeExecutor {
             _creds: Arc::new(RwLock::new(None)),
             http,
             detected_sig_type: AtomicU8::new(SIG_TYPE_AUTO),
+            detected_proxy: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -152,6 +154,7 @@ impl TradeExecutor {
         {
             *self._creds.write().await = Some(creds);
             *self.clob.write().await = Some(auth);
+            *self.detected_proxy.write().await = final_proxy;
         }
 
         // On-chain check (Diagnostic)
@@ -583,9 +586,12 @@ impl TradeExecutor {
             .as_ref()
             .ok_or_else(|| anyhow!("signer missing in live mode"))?;
 
+        let proxy_guard = self.detected_proxy.read().await;
+        let proxy_addr = proxy_guard.as_ref();
+
         let _sig_type = self.get_signature_type();
         let post = if order_type == "LIMIT" {
-            let order = clob
+            let mut order = clob
                 .limit_order()
                 .token_id(token_id)
                 .price(price)
@@ -594,6 +600,11 @@ impl TradeExecutor {
                 .order_type(OrderType::GTC)
                 .build()
                 .await?;
+
+            if let Some(addr) = proxy_addr {
+                order.order.maker = *addr;
+            }
+
             let signed = clob.sign(signer, order).await?;
             clob.post_order(signed).await?
         } else {
@@ -608,7 +619,7 @@ impl TradeExecutor {
                 Amount::shares(Decimal::from_str(&copy_shares.to_string())?)?
             };
  
-            let order = clob
+            let mut order = clob
                 .market_order()
                 .token_id(token_id)
                 .amount(amount)
@@ -616,6 +627,11 @@ impl TradeExecutor {
                 .order_type(order_t)
                 .build()
                 .await?;
+
+            if let Some(addr) = proxy_addr {
+                order.order.maker = *addr;
+            }
+
             let signed = clob.sign(signer, order).await?;
             info!(
                 "🕒 [t={}] Order signed, submitting to Polymarket CLOB...",
