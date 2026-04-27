@@ -12,6 +12,12 @@ use polymarket_client_sdk::clob::types::request::{
     OrdersRequest,
 };
 use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+const SIG_TYPE_AUTO: u8 = 0;
+const SIG_TYPE_EOA: u8 = 1;
+const SIG_TYPE_PROXY: u8 = 2;
+const SIG_TYPE_GNOSIS_SAFE: u8 = 3;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::types::{Decimal, U256};
 use reqwest::Client;
@@ -38,6 +44,7 @@ pub struct TradeExecutor {
     clob: Arc<RwLock<Option<AuthClient>>>,
     _creds: Arc<RwLock<Option<Credentials>>>,
     http: Client,
+    detected_sig_type: AtomicU8,
 }
 
 impl TradeExecutor {
@@ -70,6 +77,7 @@ impl TradeExecutor {
             clob: Arc::new(RwLock::new(None)),
             _creds: Arc::new(RwLock::new(None)),
             http,
+            detected_sig_type: AtomicU8::new(SIG_TYPE_AUTO),
         })
     }
 
@@ -335,19 +343,27 @@ impl TradeExecutor {
             eoa_bal_val, proxy_bal_val, safe_bal_val, data_api_val);
 
         // Selection logic: Favor preferred, then any non-zero, then fallback to EOA
-        let final_bal = if preferred_sig_type == SignatureType::Eoa {
-            eoa_bal_val
+        let (final_bal, detected) = if preferred_sig_type == SignatureType::Eoa {
+            (eoa_bal_val, SIG_TYPE_EOA)
         } else if preferred_sig_type == SignatureType::Proxy && proxy_bal_val > 0.0 {
-            proxy_bal_val
+            (proxy_bal_val, SIG_TYPE_PROXY)
         } else if preferred_sig_type == SignatureType::GnosisSafe && safe_bal_val > 0.0 {
-            safe_bal_val
+            (safe_bal_val, SIG_TYPE_GNOSIS_SAFE)
         } else {
-            // Fallback chain
-            if proxy_bal_val > 0.0 { proxy_bal_val }
-            else if safe_bal_val > 0.0 { safe_bal_val }
-            else if data_api_val > 0.0 { data_api_val }
-            else { eoa_bal_val }
+            // Fallback chain (Detection)
+            if proxy_bal_val > 0.0 { (proxy_bal_val, SIG_TYPE_PROXY) }
+            else if safe_bal_val > 0.0 { (safe_bal_val, SIG_TYPE_GNOSIS_SAFE) }
+            else if data_api_val > 0.0 { 
+                // If DataAPI has funds, it's usually Safe for Magic/Gmail users
+                (data_api_val, SIG_TYPE_GNOSIS_SAFE) 
+            }
+            else { (eoa_bal_val, SIG_TYPE_EOA) }
         };
+
+        if self.config.polymarket_signature_type == "AUTO" && self.detected_sig_type.load(Ordering::Relaxed) == SIG_TYPE_AUTO {
+            self.detected_sig_type.store(detected, Ordering::Relaxed);
+            info!("🎯 AUTO-DETECTED Signature Type: {:?}", self.get_signature_type());
+        }
 
         debug!("💰 Final Calculated Exchange Balance: {:.2} USDC", final_bal);
         Ok(final_bal)
@@ -501,7 +517,7 @@ impl TradeExecutor {
         let px_f = px_f.clamp(0.01, 0.99);
 
         // MARKET-AWARE ROUNDING (Tick Size Fix)
-        let tick_size = self.get_market_tick_size(token_id).await;
+        let tick_size = self.get_market_tick_size(&original_trade.token_id).await;
         let price = if tick_size >= 0.01 {
             Decimal::from_str(&format!("{:.2}", px_f))?
         } else {
@@ -1053,7 +1069,16 @@ impl TradeExecutor {
         Ok(())
     }
 
-    fn get_signature_type(&self) -> SignatureType {
+    pub fn get_signature_type(&self) -> SignatureType {
+        let detected = self.detected_sig_type.load(Ordering::Relaxed);
+        if self.config.polymarket_signature_type == "AUTO" && detected != SIG_TYPE_AUTO {
+            return match detected {
+                SIG_TYPE_EOA => SignatureType::Eoa,
+                SIG_TYPE_PROXY => SignatureType::Proxy,
+                _ => SignatureType::GnosisSafe,
+            };
+        }
+
         match self.config.polymarket_signature_type.as_str() {
             "PROXY" => SignatureType::Proxy,
             "GNOSIS_SAFE" => SignatureType::GnosisSafe,

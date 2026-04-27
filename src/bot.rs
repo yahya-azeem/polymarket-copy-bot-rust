@@ -5,6 +5,7 @@ use anyhow::Result;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+use crate::cache::WhaleCache;
 use crate::config::Config;
 use crate::monitor::{self, TradeMonitor};
 use crate::positions::PositionTracker;
@@ -23,6 +24,7 @@ pub struct BotState {
     pub executor: Arc<TradeExecutor>,
     pub positions: Arc<Mutex<PositionTracker>>,
     pub risk: Arc<Mutex<RiskManager>>,
+    pub whale_cache: Arc<Mutex<WhaleCache>>,
     pub processed_trades: Mutex<BoundedDedup>,
     pub stats: Mutex<Stats>,
     pub last_trade_ms: Mutex<i64>,
@@ -196,11 +198,14 @@ impl PolymarketCopyBot {
         let risk = Arc::new(Mutex::new(RiskManager::new(config.clone(), positions.clone())));
         let now = current_time_ms();
 
+        let whale_cache = Arc::new(Mutex::new(WhaleCache::load()));
+
         let state = Arc::new(BotState {
             config,
             executor,
             positions,
             risk,
+            whale_cache,
             processed_trades: Mutex::new(BoundedDedup::new(MAX_PROCESSED_TRADES)),
             stats: Mutex::new(Stats::default()),
             last_trade_ms: Mutex::new(0),
@@ -256,6 +261,12 @@ impl PolymarketCopyBot {
         ws.initialize(seed_assets).await?;
         self.ws_monitor = Some(ws);
         
+        // Update Whale Cache with current target list
+        {
+            let mut cache = self.state.whale_cache.lock().await;
+            cache.add_whales(self.state.config.target_wallets.clone());
+        }
+
         info!("Monitor initialized at {}", current_time_ms());
         
         // Final Phase: Cross-reconcile with Whales (State Recovery)
@@ -375,38 +386,61 @@ impl PolymarketCopyBot {
         
         if your_positions.is_empty() {
             info!("✅ Portfolio is clean. No existing positions to reconcile.");
-            return;
         }
 
         // 2. Get all whale positions (collect unique token IDs held by whales)
+        // We check EVERY whale in our persistent cache to ensure no 'Leaderboard Drift'
         let mut whale_tokens = std::collections::HashSet::new();
-        for whale in &self.state.config.target_wallets {
-            if let Ok(positions) = self.state.executor.get_positions_for_user(whale).await {
+        let active_whales: std::collections::HashSet<String> = self.state.config.target_wallets.iter().map(|s| s.to_lowercase()).collect();
+        let all_historical_whales = self.state.whale_cache.lock().await.get_all();
+        let mut whales_to_remove = Vec::new();
+
+        info!("🔍 State Recovery: Auditing your portfolio against {} historical whales...", all_historical_whales.len());
+        
+        for whale in all_historical_whales {
+            let mut has_position = false;
+            if let Ok(positions) = self.state.executor.get_positions_for_user(&whale).await {
                 for pos in positions {
                     if let Some(token_id) = pos.get("asset").and_then(|v| v.as_str()) {
                         whale_tokens.insert(token_id.to_string());
+                        has_position = true;
                     }
                 }
             }
-        }
-
-        // 3. Identify abandoned positions
-        let mut abandoned_count = 0;
-        for pos in your_positions {
-            let token_id = pos.get("asset").and_then(|v| v.as_str()).unwrap_or("");
-            let size = pos.get("size").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
             
-            if size > 0.0 && !whale_tokens.contains(token_id) {
-                abandoned_count += 1;
-                warn!("⚠️ ABANDONED POSITION: Whales have exited {}, but you still hold it.", token_id);
-                info!("💡 TIP: If you want the bot to automatically exit these, you can enable 'AUTO_EXIT_ABANDONED=true' (Coming soon).");
+            // If the whale has 0 positions and is NOT in our active monitoring list, mark for removal
+            if !has_position && !active_whales.contains(&whale.to_lowercase()) {
+                whales_to_remove.push(whale);
             }
         }
-        
-        if abandoned_count == 0 {
-            info!("✅ State Recovery complete: All local positions are currently held by whales.");
-        } else {
-            warn!("🚨 State Recovery complete: {} abandoned positions found. Consider manual review/exit.", abandoned_count);
+
+        // Perform Cache Cleanup
+        if !whales_to_remove.is_empty() {
+            let mut cache = self.state.whale_cache.lock().await;
+            for w in whales_to_remove {
+                info!("🧹 Cache Cleanup: Removing whale {} (Inactive & no positions).", w);
+                cache.remove_whale(&w);
+            }
+        }
+
+        // 3. Identify abandoned positions (only if we actually hold positions)
+        if !your_positions.is_empty() {
+            let mut abandoned_count = 0;
+            for pos in your_positions {
+                let token_id = pos.get("asset").and_then(|v| v.as_str()).unwrap_or("");
+                let size = pos.get("size").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                
+                if size > 0.0 && !whale_tokens.contains(token_id) {
+                    abandoned_count += 1;
+                    warn!("⚠️ ABANDONED POSITION: Whales have exited {}, but you still hold it.", token_id);
+                }
+            }
+            
+            if abandoned_count == 0 {
+                info!("✅ State Recovery complete: All local positions are currently held by whales.");
+            } else {
+                warn!("🚨 State Recovery complete: {} abandoned positions found. Consider manual review/exit.", abandoned_count);
+            }
         }
     }
 }
