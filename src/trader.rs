@@ -97,70 +97,63 @@ impl TradeExecutor {
             ClobConfig::builder().use_server_time(true).build(),
         )?;
 
+        // 🔍 DISCOVERY: Auto-detect signature type using Gamma Profile API
+        let mut final_sig_type = self.get_signature_type();
+        let mut final_proxy = None;
+
+        if self.config.polymarket_signature_type == "AUTO" {
+            let addr = format!("{:?}", signer.address()).trim_matches('"').to_lowercase();
+            let url = format!("https://gamma-api.polymarket.com/public-profile?address={}", addr);
+            
+            if let Ok(resp) = self.http.get(url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(profile) = resp.json::<Value>().await {
+                        if let Some(proxy) = profile.get("proxyWallet").and_then(|v| v.as_str()) {
+                            if !proxy.is_empty() && proxy != "0x0000000000000000000000000000000000000000" {
+                                info!("🎯 AUTO-DETECTED Gnosis Safe Proxy: {}", proxy);
+                                final_sig_type = SignatureType::GnosisSafe;
+                                final_proxy = Some(proxy.parse()?);
+                                self.detected_sig_type.store(SIG_TYPE_GNOSIS_SAFE, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if final_sig_type != SignatureType::GnosisSafe {
+                // If no proxy found, fall back to EOA
+                self.detected_sig_type.store(SIG_TYPE_EOA, Ordering::Relaxed);
+                final_sig_type = SignatureType::Eoa;
+            }
+        }
+
+        // Now initialize CLOB once with the correct settings
         let creds = unauth
-            .create_or_derive_api_key(signer, None)
+            .create_or_derive_api_key(signer, final_proxy)
             .await
             .map_err(|e| anyhow!("failed to derive/create api key: {e}"))?;
 
-        let sig_type = self.get_signature_type();
-        let mut auth = unauth
-            .clone()
+        let auth = unauth
             .authentication_builder(signer)
             .credentials(creds.clone())
-            .signature_type(sig_type)
+            .signature_type(final_sig_type)
             .authenticate()
             .await?;
 
         let _ = auth.api_keys().await?;
-        
-        // 🔍 DISCOVERY: Auto-detect signature type early
-        if self.config.polymarket_signature_type == "AUTO" {
-            // Temporarily store auth to run balance check
-            {
-                *self._creds.write().await = Some(creds.clone());
-                *self.clob.write().await = Some(auth.clone());
-            }
-            
-            let _ = self.get_your_balance_usdc().await;
-            let detected = self.detected_sig_type.load(Ordering::Relaxed);
-            
-            if detected == SIG_TYPE_GNOSIS_SAFE {
-                info!("🔄 Re-initializing credentials for Gnosis Safe proxy...");
-                let safe_addr = self.get_address().await;
-                let safe_addr_clean = safe_addr.trim_matches('"').to_lowercase();
-                
-                // Re-derive API key using the Safe as the proxy
-                let safe_creds = unauth
-                    .create_or_derive_api_key(signer, Some(safe_addr_clean.parse()?))
-                    .await
-                    .map_err(|e| anyhow!("failed to derive safe api key: {e}"))?;
-                
-                auth = unauth
-                    .authentication_builder(signer)
-                    .credentials(safe_creds.clone())
-                    .signature_type(SignatureType::GnosisSafe)
-                    .authenticate()
-                    .await?;
-                
-                *self._creds.write().await = Some(safe_creds);
-                *self.clob.write().await = Some(auth);
-            } else {
-                *self._creds.write().await = Some(creds);
-                *self.clob.write().await = Some(auth);
-            }
-        } else {
+        info!("API credentials initialized ({:?}).", final_sig_type);
+
+        {
             *self._creds.write().await = Some(creds);
             *self.clob.write().await = Some(auth);
         }
-
-        info!("API credentials initialized.");
 
         // On-chain check (Diagnostic)
         if let Ok((usdc, usdce)) = self.get_onchain_balances().await {
             info!("💰 On-Chain Assets: {:.2} USDC (Native) | {:.2} USDC.e (Bridged)", usdc, usdce);
         }
 
-        // Geoblock check only at init (Bug #10 fix — no longer on every trade)
+        // Geoblock check only at init
         self.check_geoblock().await?;
         self.ensure_approvals().await?;
         Ok(())
