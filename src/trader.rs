@@ -13,7 +13,7 @@ use polymarket_client_sdk::clob::types::request::{
     OrdersRequest,
 };
 use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType, Order};
-use std::collections::HashMap;
+
 use std::sync::atomic::{AtomicU8, Ordering};
 
 const SIG_TYPE_AUTO: u8 = 0;
@@ -25,7 +25,7 @@ use polymarket_client_sdk::types::{Decimal, U256};
 use reqwest::Client;
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::types::{Trade, CopyExecutionResult};
@@ -351,23 +351,25 @@ impl TradeExecutor {
             .cloned()
             .ok_or_else(|| anyhow!("trader not initialized"))?;
 
-        let mut total_bal = 0.0;
+        let mut max_bal = 0.0;
         for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe] {
-            for token in [USDC_NATIVE, USDC_BRIDGED] {
-                let req = BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Collateral)
-                    .signature_type(sig)
-                    .token_id(token.to_string())
-                    .build();
-                if let Ok(bal) = clob.balance_allowance(req).await {
-                    let val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0);
-                    if val > total_bal {
-                        total_bal = val;
+            for token_str in [USDC_NATIVE, USDC_BRIDGED] {
+                if let Ok(token_id) = U256::from_str(token_str) {
+                    let req = BalanceAllowanceRequest::builder()
+                        .asset_type(AssetType::Collateral)
+                        .signature_type(sig)
+                        .token_id(token_id)
+                        .build();
+                    if let Ok(bal) = clob.balance_allowance(req).await {
+                        let val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
+                        if val > max_bal {
+                            max_bal = val;
+                        }
                     }
                 }
             }
         }
-        Ok(total_bal)
+        Ok(max_bal)
     }
 
     pub async fn get_market_collateral(&self, market_id: &str) -> Result<String> {
@@ -381,49 +383,6 @@ impl TradeExecutor {
         }
         Ok(USDC_NATIVE.to_string())
     }
-
-        debug!("💰 [DEBUG] Balances: EOA={:.2} | Proxy={:.2} | Safe={:.2} | DataAPI={:.2}", 
-            eoa_bal_val, proxy_bal_val, safe_bal_val, data_api_val);
-
-        // 🔍 Highest Balance Detection
-        let mut best_bal = eoa_bal_val;
-        let mut best_type = SIG_TYPE_EOA;
-
-        if proxy_bal_val > best_bal {
-            best_bal = proxy_bal_val;
-            best_type = SIG_TYPE_PROXY;
-        }
-        if safe_bal_val > best_bal {
-            best_bal = safe_bal_val;
-            best_type = SIG_TYPE_GNOSIS_SAFE;
-        }
-        if data_api_val > best_bal {
-            best_bal = data_api_val;
-            best_type = SIG_TYPE_GNOSIS_SAFE; // Data API balance usually implies Gnosis Safe
-        }
-
-        // 🎯 Selection logic
-        let (final_bal, detected) = if self.config.polymarket_signature_type == "AUTO" {
-            (best_bal, best_type)
-        } else {
-            // Manual Override: Honor the .env setting
-            match preferred_sig_type {
-                SignatureType::Eoa => (eoa_bal_val, SIG_TYPE_EOA),
-                SignatureType::Proxy => (proxy_bal_val, SIG_TYPE_PROXY),
-                SignatureType::GnosisSafe => (safe_bal_val, SIG_TYPE_GNOSIS_SAFE),
-                _ => (eoa_bal_val, SIG_TYPE_EOA), // Catch-all for SDK updates
-            }
-        };
-
-        if self.config.polymarket_signature_type == "AUTO" && self.detected_sig_type.load(Ordering::Relaxed) == SIG_TYPE_AUTO {
-            self.detected_sig_type.store(detected, Ordering::Relaxed);
-            info!("🎯 AUTO-DETECTED Signature Type: {:?}", self.get_signature_type());
-        }
-
-        debug!("💰 Final Calculated Exchange Balance: {:.2} USDC", final_bal);
-        Ok(final_bal)
-    }
-
     async fn get_target_balance_usdc(&self, target_wallet: &str) -> Result<f64> {
         let t_start = current_time_ms();
         info!(
