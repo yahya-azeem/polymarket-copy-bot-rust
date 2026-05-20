@@ -11,7 +11,7 @@ use polymarket_client_sdk::auth::{Credentials, Normal};
 use polymarket_client_sdk::clob::types::request::{
     BalanceAllowanceRequest, OrderBookSummaryRequest, UpdateBalanceAllowanceRequest, OrdersRequest,
 };
-use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType, OrderPayload};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::types::{Decimal, U256};
 use reqwest::Client;
@@ -683,8 +683,10 @@ impl TradeExecutor {
             let final_sig_u8 = sig_type as u8;
 
             if let Some(addr) = proxy_addr {
-                order.order.maker = *addr;
-                order.order.signatureType = final_sig_u8;
+                if let OrderPayload::V2(ref mut payload) = order.payload {
+                    payload.order.maker = *addr;
+                    payload.order.signatureType = final_sig_u8;
+                }
                 info!("🛠️ Order configured for Proxy/Safe: maker={}, type={}", addr, final_sig_u8);
             } else if sig_type != SignatureType::Eoa {
                 bail!("❌ Signature type is {:?} but no proxy address was detected. Please check your account on Polymarket.", sig_type);
@@ -716,8 +718,10 @@ impl TradeExecutor {
             let final_sig_u8 = sig_type as u8;
 
             if let Some(addr) = proxy_addr {
-                order.order.maker = *addr;
-                order.order.signatureType = final_sig_u8;
+                if let OrderPayload::V2(ref mut payload) = order.payload {
+                    payload.order.maker = *addr;
+                    payload.order.signatureType = final_sig_u8;
+                }
                 info!("🛠️ Market order configured for Proxy/Safe: maker={}, type={}", addr, final_sig_u8);
             } else if sig_type != SignatureType::Eoa {
                 bail!("❌ Signature type is {:?} but no proxy address was detected. Please check your account on Polymarket.", sig_type);

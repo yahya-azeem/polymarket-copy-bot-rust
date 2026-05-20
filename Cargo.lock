@@ -3028,38 +3028,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
-name = "polymarket-client-sdk"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0852dbe6df78c4964452d6071abdc7ec0f649042c76733a075cb79e322745eaa"
-dependencies = [
- "alloy",
- "async-stream",
- "async-trait",
- "base64",
- "bon",
- "chrono",
- "dashmap",
- "futures",
- "hmac",
- "phf",
- "rand 0.10.0",
- "reqwest 0.13.2",
- "rust_decimal",
- "rust_decimal_macros",
- "secrecy",
- "serde",
- "serde_html_form",
- "serde_json",
- "serde_repr",
- "serde_with",
- "sha2",
- "strum_macros 0.28.0",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "polymarket-copy-bot-rust"
 version = "1.0.0"
 dependencies = [
@@ -3087,7 +3055,7 @@ dependencies = [
  "ctrlc",
  "dotenvy",
  "futures-util",
- "polymarket-client-sdk",
+ "polymarket_client_sdk_v2",
  "reqwest 0.12.28",
  "rustls",
  "serde",
@@ -3097,6 +3065,39 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "polymarket_client_sdk_v2"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "594de0bf0e129e266946f02acbf579253951afbbee92fc1564da3c9179303aea"
+dependencies = [
+ "alloy",
+ "async-stream",
+ "async-trait",
+ "base64",
+ "bon",
+ "chrono",
+ "dashmap",
+ "futures",
+ "hmac",
+ "phf",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "secrecy",
+ "serde",
+ "serde_html_form",
+ "serde_json",
+ "serde_repr",
+ "serde_with",
+ "sha1",
+ "sha2",
+ "strum_macros 0.28.0",
+ "url",
+ "uuid",
 ]
 
 [[package]]
