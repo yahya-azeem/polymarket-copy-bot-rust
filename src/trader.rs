@@ -1,31 +1,24 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use alloy::signers::local::PrivateKeySigner;
 use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer;
 use anyhow::{Result, anyhow, bail};
 use polymarket_client_sdk::POLYGON;
-use polymarket_client_sdk::auth::Credentials;
-use polymarket_client_sdk::auth::{Normal, state::Authenticated};
-use polymarket_client_sdk::auth::Signer as _;
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::auth::{Credentials, Normal};
 use polymarket_client_sdk::clob::types::request::{
-    BalanceAllowanceRequest, OrderBookSummaryRequest, UpdateBalanceAllowanceRequest,
-    OrdersRequest,
+    BalanceAllowanceRequest, OrderBookSummaryRequest, UpdateBalanceAllowanceRequest, OrdersRequest,
 };
-use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType, Order};
-
-use std::sync::atomic::{AtomicU8, Ordering};
-
-const SIG_TYPE_AUTO: u8 = 0;
-const SIG_TYPE_EOA: u8 = 1;
-const SIG_TYPE_PROXY: u8 = 2;
-const SIG_TYPE_GNOSIS_SAFE: u8 = 3;
+use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::types::{Decimal, U256};
 use reqwest::Client;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::types::{Trade, CopyExecutionResult};
@@ -35,11 +28,19 @@ use crate::utils::current_time_ms;
 const DATA_API_POSITIONS: &str = "https://data-api.polymarket.com/positions";
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 const SIM_BASE: &str = "https://api.polysimulator.com/v1";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 const USDC_NATIVE: &str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
 const USDC_BRIDGED: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const PUSD: &str = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+
+const SIG_TYPE_AUTO: u8 = 0;
+const SIG_TYPE_EOA: u8 = 1;
+const SIG_TYPE_PROXY: u8 = 2;
+const SIG_TYPE_GNOSIS_SAFE: u8 = 3;
 
 type AuthClient = ClobClient<Authenticated<Normal>>;
+
 
 
 
@@ -63,10 +64,11 @@ impl TradeExecutor {
 
         // Initialize HTTP client with Geo Token if available
         let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::USER_AGENT, reqwest::header::HeaderValue::from_static(USER_AGENT));
+        
         if let Some(ref token) = config.polymarket_geo_token {
             let clean_token = token.trim_matches('\'').trim_matches('"');
-            let ascii_token: String = clean_token.chars().filter(|c| c.is_ascii()).collect();
-            let cookie_val = format!("polymarket_geo_token={}", ascii_token);
+            let cookie_val = format!("polymarket_geo_token={}", clean_token);
             
             if let Ok(v) = reqwest::header::HeaderValue::from_str(&cookie_val) {
                 headers.insert(reqwest::header::COOKIE, v);
@@ -90,7 +92,7 @@ impl TradeExecutor {
 
     pub async fn initialize(&self) -> Result<()> {
         if self.config.simulation_mode {
-            info!("Simulation Mode Enabled. Skipping Polymarket CLOB authentication.");
+            info!("🚀 Simulation Mode Enabled. Skipping Polymarket CLOB authentication.");
             return Ok(());
         }
 
@@ -99,16 +101,68 @@ impl TradeExecutor {
             .as_ref()
             .ok_or_else(|| anyhow!("signer missing in live mode"))?;
 
+        // 🔍 DISCOVERY: Auto-detect proxy/Safe address
+        let (raw_sig_type, final_proxy) = self.discover_account_details(signer).await?;
+
+        // The SDK's SignatureType enum already has the correct values:
+        // Eoa = 0, Proxy = 1, GnosisSafe = 2
+        // Using transmute to force invalid values (like 3) breaks EIP-712 signing.
+        let sdk_sig_type: SignatureType = raw_sig_type;
+
+        info!("🔐 Initializing Polymarket authentication (Type: {:?}, Funder: {:?})", raw_sig_type, final_proxy);
+
         let unauth = ClobClient::new(
             CLOB_HOST,
-            ClobConfig::builder().use_server_time(true).build(),
+            ClobConfig::builder()
+                .use_server_time(true)
+                .build(),
         )?;
 
-        // 🔍 DISCOVERY: Auto-detect signature type using Gamma Profile API
-        let mut final_sig_type = self.get_signature_type();
-        let mut final_proxy: Option<Address> = None;
+        let mut auth_builder = unauth.authentication_builder(signer)
+            .signature_type(sdk_sig_type);
+        
+        if let Some(proxy_addr) = final_proxy {
+            auth_builder = auth_builder.funder(proxy_addr);
+        }
 
-        if self.config.polymarket_signature_type == "AUTO" {
+        let auth = auth_builder.authenticate().await
+            .map_err(|e| {
+                let err_str = e.to_string();
+                if err_str.contains("400") {
+                    anyhow!("Polymarket authentication failed (400 Bad Request).\nThis usually means your account is not 'Activated' for trading on the CLOB.\nFIX: Go to Polymarket.com, sign in with this wallet, and 'Enable Trading' (make a small trade or deposit) to activate your account.")
+                } else if err_str.contains("403") {
+                    anyhow!("Polymarket authentication failed (403 Forbidden).\nCloudflare is blocking the bot's activation request.\nFIX: You must first log in and 'Enable Trading' on the Polymarket website using this wallet in your browser.")
+                } else {
+                    anyhow!("Polymarket authentication failed: {e}")
+                }
+            })?;
+
+        info!("✅ Polymarket session initialized successfully.");
+
+{
+            let mut clob_lock = self.clob.write().await;
+            let mut proxy_lock = self.detected_proxy.write().await;
+            
+            *clob_lock = Some(auth);
+            *proxy_lock = final_proxy;
+        }
+
+        // Sync on-chain deposits to exchange balance (critical for Gnosis Safe / Proxy wallets)
+        self.ensure_approvals().await?;
+
+        Ok(())
+    }
+
+    /// Helper to discover account details like proxy address and signature type
+    async fn discover_account_details(&self, signer: &PrivateKeySigner) -> Result<(SignatureType, Option<Address>)> {
+        let mut sig_type = self.get_signature_type();
+        let mut proxy_addr: Option<Address> = None;
+
+        let should_detect = self.config.polymarket_signature_type == "AUTO" 
+            || sig_type == SignatureType::Proxy 
+            || sig_type == SignatureType::GnosisSafe;
+
+        if should_detect {
             let addr = format!("{:?}", signer.address()).trim_matches('"').to_lowercase();
             let url = format!("https://gamma-api.polymarket.com/public-profile?address={}", addr);
             
@@ -117,63 +171,31 @@ impl TradeExecutor {
                     if let Ok(profile) = resp.json::<Value>().await {
                         if let Some(proxy) = profile.get("proxyWallet").and_then(|v| v.as_str()) {
                             if !proxy.is_empty() && proxy != "0x0000000000000000000000000000000000000000" {
-                                info!("🎯 AUTO-DETECTED Gnosis Safe Proxy: {}", proxy);
-                                final_sig_type = SignatureType::Proxy;
-                                final_proxy = Some(Address::from_str(proxy.trim())?);
-                                self.detected_sig_type.store(SIG_TYPE_PROXY, Ordering::Relaxed);
+                                info!("🎯 Detected Active Proxy: {}", proxy);
+                                if self.config.polymarket_signature_type == "AUTO" {
+                                    sig_type = SignatureType::GnosisSafe;
+                                }
+                                proxy_addr = Some(Address::from_str(proxy.trim())?);
+                                
+                                // Update internal atomic state
+                                let sig_val = if sig_type == SignatureType::Proxy { SIG_TYPE_PROXY } else { SIG_TYPE_GNOSIS_SAFE };
+                                self.detected_sig_type.store(sig_val, Ordering::Relaxed);
                             }
                         }
                     }
                 }
             }
-            
-            if final_sig_type == SignatureType::Eoa {
-                // If no proxy found, fall back to EOA explicitly
-                self.detected_sig_type.store(SIG_TYPE_EOA, Ordering::Relaxed);
-                final_sig_type = SignatureType::Eoa;
-            }
         }
-
-        // Now initialize CLOB once with the correct settings
-        let creds = unauth
-            .create_or_derive_api_key(signer, None) // Nonce is None
-            .await
-            .map_err(|e| anyhow!("failed to derive/create api key: {e}"))?;
-
-        let mut builder = unauth
-            .authentication_builder(signer)
-            .credentials(creds.clone())
-            .signature_type(final_sig_type);
         
-        // If we have a detected proxy, use it as the funder (Safe address)
-        if let Some(proxy_addr) = final_proxy {
-            builder = builder.funder(proxy_addr);
+        if sig_type == SignatureType::Eoa && self.config.polymarket_signature_type == "AUTO" {
+            self.detected_sig_type.store(SIG_TYPE_EOA, Ordering::Relaxed);
         }
 
-        let auth = builder.authenticate().await?;
-
-        let _ = auth.api_keys().await?;
-        info!("API credentials initialized ({:?}).", final_sig_type);
-
-        {
-            *self._creds.write().await = Some(creds);
-            *self.clob.write().await = Some(auth);
-            *self.detected_proxy.write().await = final_proxy;
-        }
-
-        // On-chain check (Diagnostic)
-        if let Ok((usdc, usdce)) = self.get_onchain_balances().await {
-            info!("💰 On-Chain Assets: {:.2} USDC (Native) | {:.2} USDC.e (Bridged)", usdc, usdce);
-        }
-
-        // Geoblock check only at init
-        self.check_geoblock().await?;
-        self.ensure_approvals().await?;
-        Ok(())
+        Ok((sig_type, proxy_addr))
     }
 
+
     pub async fn get_onchain_balances(&self) -> Result<(f64, f64)> {
-        use alloy::primitives::Address;
         use alloy::providers::{Provider, ProviderBuilder};
         
         let rpc_url = self.config.rpc_url.parse()?;
@@ -182,35 +204,55 @@ impl TradeExecutor {
         let signer_addr_str = self.get_address().await;
         let signer_addr: Address = signer_addr_str.trim_matches('"').parse()?;
         
-        // Native USDC (Polygon)
-        let usdc_addr: Address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359".parse()?;
-        // Bridged USDC.e (Polygon) - Polymarket uses this
-        let usdce_addr: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".parse()?;
+        let proxy_guard = self.detected_proxy.read().await;
+        let proxy_addr = proxy_guard.as_ref();
 
-        // IERC20::balanceOf(address) = 0x70a08231
-        let mut data = Vec::with_capacity(36);
-        data.extend_from_slice(&[0x70, 0xa0, 0x82, 0x31]);
-        data.extend_from_slice(&[0u8; 12]);
-        data.extend_from_slice(signer_addr.as_slice());
+        let mut total_usdc = 0.0;
+        let mut total_usdce = 0.0;
+        let mut total_pusd = 0.0;
 
-        let mut usdc_val = 0.0;
-        let mut usdce_val = 0.0;
+        let mut addresses = vec![signer_addr];
+        if let Some(p) = proxy_addr {
+            addresses.push(*p);
+        }
 
-        if let Ok(res) = provider.call(alloy_rpc_types_eth::TransactionRequest::default().to(usdc_addr).input(data.clone().into())).await {
-            if res.len() >= 32 {
-                let val = alloy::primitives::U256::from_be_slice(&res[0..32]);
-                usdc_val = val.to::<u128>() as f64 / 1_000_000.0;
+        for addr in addresses {
+            // Native USDC (Polygon)
+            let usdc_addr: Address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359".parse()?;
+            // Bridged USDC.e (Polygon) - Polymarket V1 collateral
+            let usdce_addr: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".parse()?;
+            // pUSD (Polymarket USD) - Polymarket V2 collateral (since April 28, 2026)
+            let pusd_addr: Address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB".parse()?;
+
+            // IERC20::balanceOf(address) = 0x70a08231
+            let mut data = Vec::with_capacity(36);
+            data.extend_from_slice(&[0x70, 0xa0, 0x82, 0x31]);
+            data.extend_from_slice(&[0u8; 12]);
+            data.extend_from_slice(addr.as_slice());
+
+            if let Ok(res) = provider.call(alloy_rpc_types_eth::TransactionRequest::default().to(usdc_addr).input(data.clone().into())).await {
+                if res.len() >= 32 {
+                    let val = alloy::primitives::U256::from_be_slice(&res[0..32]);
+                    total_usdc += val.to::<u128>() as f64 / 1_000_000.0;
+                }
+            }
+
+            if let Ok(res) = provider.call(alloy_rpc_types_eth::TransactionRequest::default().to(usdce_addr).input(data.clone().into())).await {
+                if res.len() >= 32 {
+                    let val = alloy::primitives::U256::from_be_slice(&res[0..32]);
+                    total_usdce += val.to::<u128>() as f64 / 1_000_000.0;
+                }
+            }
+
+            if let Ok(res) = provider.call(alloy_rpc_types_eth::TransactionRequest::default().to(pusd_addr).input(data.into())).await {
+                if res.len() >= 32 {
+                    let val = alloy::primitives::U256::from_be_slice(&res[0..32]);
+                    total_pusd += val.to::<u128>() as f64 / 1_000_000.0;
+                }
             }
         }
 
-        if let Ok(res) = provider.call(alloy_rpc_types_eth::TransactionRequest::default().to(usdce_addr).input(data.into())).await {
-            if res.len() >= 32 {
-                let val = alloy::primitives::U256::from_be_slice(&res[0..32]);
-                usdce_val = val.to::<u128>() as f64 / 1_000_000.0;
-            }
-        }
-
-        Ok((usdc_val, usdce_val))
+        Ok((total_usdc, total_usdce + total_pusd))
     }
 
     pub async fn calculate_copy_size(&self, original_size: f64, target_wallet: &str) -> f64 {
@@ -351,27 +393,101 @@ impl TradeExecutor {
             .cloned()
             .ok_or_else(|| anyhow!("trader not initialized"))?;
 
-        let mut max_bal = 0.0;
+        let mut max_bal: f64 = 0.0;
+        let signer_addr = self.get_address().await.trim_matches('"').to_lowercase();
+        let proxy_addr = {
+            let p = self.detected_proxy.read().await;
+            p.map(|a| format!("{:?}", a).to_lowercase())
+        };
+        
+        // Fallback address from previous session (just in case of wallet mismatch)
+        let fallback_addr = "0x83A6487eE74712F2d2f703554e2A0D0704443916".to_lowercase();
+
+        // 1. CLOB API: try without token_id first (returns combined collateral balance)
         for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe] {
-            for token_str in [USDC_NATIVE, USDC_BRIDGED] {
-                if let Ok(token_id) = U256::from_str(token_str) {
-                    let req = BalanceAllowanceRequest::builder()
-                        .asset_type(AssetType::Collateral)
-                        .signature_type(sig)
-                        .token_id(token_id)
-                        .build();
-                    if let Ok(bal) = clob.balance_allowance(req).await {
-                        let val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
-                        if val > max_bal {
-                            max_bal = val;
-                        }
+            let req = BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Collateral)
+                .signature_type(sig)
+                .build();
+            if let Ok(bal) = clob.balance_allowance(req).await {
+                let val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
+                if val > 0.0 {
+                    debug!("CLOB Balance (all tokens, {:?}): {:.2}", sig, val);
+                    max_bal = max_bal.max(val);
+                }
+            }
+        }
+
+        // 2. CLOB API: try specific token IDs (USDC, USDC.e, pUSD)
+        for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe] {
+            for (label, token) in [("USDC", USDC_NATIVE), ("USDC.e", USDC_BRIDGED), ("pUSD", PUSD)] {
+                let Ok(token_id) = U256::from_str(token) else { continue };
+                let req = BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Collateral)
+                    .signature_type(sig)
+                    .token_id(token_id)
+                    .build();
+                if let Ok(bal) = clob.balance_allowance(req).await {
+                    let val = bal.balance.to_string().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
+                    if val > 0.0 {
+                        debug!("CLOB Balance ({label}, {:?}): {:.2}", sig, val);
+                        max_bal = max_bal.max(val);
                     }
                 }
             }
         }
+
+        // 🔍 Source: Open Orders
+        if let Ok(orders_page) = clob.orders(&OrdersRequest::default(), None).await {
+            let mut order_total = 0.0;
+            for order in orders_page.data {
+                let price = order.price.to_string().parse::<f64>().unwrap_or(0.0);
+                let size = order.original_size.to_string().parse::<f64>().unwrap_or(0.0);
+                order_total += price * size;
+            }
+            if order_total > 0.0 {
+                debug!("Found ${:.2} locked in open orders.", order_total);
+                max_bal = max_bal.max(order_total);
+            }
+        }
+
+        // 🔍 Source: Data API Fallback
+        let check_data = |addr: String| {
+            let url = "https://data-api.polymarket.com/value";
+            let http = self.http.clone();
+            async move {
+                if let Ok(resp) = http.get(url).query(&[("user", &addr)]).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(value) = resp.json::<Value>().await {
+                            let val = if let Some(arr) = value.as_array() {
+                                arr.get(0).and_then(|row| row.get("value")).and_then(to_f64).unwrap_or(0.0)
+                            } else {
+                                value.get("value").and_then(to_f64).or_else(|| to_f64(&value)).unwrap_or(0.0)
+                            };
+                            if val > 0.0 {
+                                debug!("Data API ({}): {:.2}", addr, val);
+                            }
+                            return val;
+                        }
+                    }
+                }
+                0.0
+            }
+        };
+
+        max_bal = max_bal.max(check_data(signer_addr).await);
+        max_bal = max_bal.max(check_data(fallback_addr).await);
+        if let Some(ref p) = proxy_addr {
+            max_bal = max_bal.max(check_data(p.clone()).await);
+        }
+
+        info!("💳 Exchange Balance Audit: Found max balance of ${:.2} across all sources.", max_bal);
+
         Ok(max_bal)
     }
 
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub async fn get_market_collateral(&self, market_id: &str) -> Result<String> {
         let url = format!("https://gamma-api.polymarket.com/markets/{}", market_id);
         let resp = self.http.get(url).send().await?;
@@ -552,7 +668,7 @@ impl TradeExecutor {
         let proxy_guard = self.detected_proxy.read().await;
         let proxy_addr = proxy_guard.as_ref();
 
-        let _sig_type = self.get_signature_type();
+        let sig_type = self.get_signature_type();
         let post = if order_type == "LIMIT" {
             let mut order = clob
                 .limit_order()
@@ -564,8 +680,14 @@ impl TradeExecutor {
                 .build()
                 .await?;
 
+            let final_sig_u8 = sig_type as u8;
+
             if let Some(addr) = proxy_addr {
                 order.order.maker = *addr;
+                order.order.signatureType = final_sig_u8;
+                info!("🛠️ Order configured for Proxy/Safe: maker={}, type={}", addr, final_sig_u8);
+            } else if sig_type != SignatureType::Eoa {
+                bail!("❌ Signature type is {:?} but no proxy address was detected. Please check your account on Polymarket.", sig_type);
             }
 
             let signed = clob.sign(signer, order).await?;
@@ -591,8 +713,14 @@ impl TradeExecutor {
                 .build()
                 .await?;
 
+            let final_sig_u8 = sig_type as u8;
+
             if let Some(addr) = proxy_addr {
                 order.order.maker = *addr;
+                order.order.signatureType = final_sig_u8;
+                info!("🛠️ Market order configured for Proxy/Safe: maker={}, type={}", addr, final_sig_u8);
+            } else if sig_type != SignatureType::Eoa {
+                bail!("❌ Signature type is {:?} but no proxy address was detected. Please check your account on Polymarket.", sig_type);
             }
 
             let signed = clob.sign(signer, order).await?;
@@ -998,6 +1126,8 @@ impl TradeExecutor {
         Ok(total_sold)
     }
 
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     async fn check_geoblock(&self) -> Result<()> {
         info!(
             "🕒 [t={}] Checking geographic eligibility...",

@@ -226,7 +226,13 @@ impl PolymarketCopyBot {
         self.state.executor.initialize().await?;
         
         // Now it's safe to fetch balance
-        let exchange_bal = self.state.executor.get_your_balance_usdc().await.unwrap_or(0.0);
+        let exchange_bal = match self.state.executor.get_your_balance_usdc().await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("⚠️ Balance Detection Failed: {e}");
+                0.0
+            }
+        };
         let addr = self.state.executor.get_address().await;
 
         info!("═══════════════════════════════════════════");
@@ -238,7 +244,7 @@ impl PolymarketCopyBot {
         if let Ok((usdc, usdce)) = self.state.executor.get_onchain_balances().await {
             info!("💰 WALLET HUB (On-Chain):");
             info!("   Native USDC:  {:.2}", usdc);
-            info!("   Bridged USDce: {:.2} (Required for trading)", usdce);
+            info!("   Bridged USDce: {:.2} (V1 legacy)", usdce);
         }
 
         info!("💰 EXCHANGE HUB (Polymarket):");

@@ -1,2 +1,14 @@
 target/
 .env
+bot_output*.log
+current_run.log
+final_clean_run.log
+balance_debug.txt
+build_errors.txt
+whale_cache.json
+ground_truth.json
+logs/
+scratch/
+.sandbox-home/
+.sandbox-tmp/
+.claw/

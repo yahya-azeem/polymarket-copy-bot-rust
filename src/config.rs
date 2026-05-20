@@ -63,6 +63,7 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         let target_wallets = parse_csv(&env("TARGET_WALLETS", &env("TARGET_WALLET", "")));
         let use_leaderboard = env("USE_POLYWHALER_LEADERBOARD", "false").to_lowercase() == "true";
+        let sig_type_config = env("POLYMARKET_SIGNATURE_TYPE", "AUTO").to_uppercase();
         Ok(Self {
             target_wallets,
             use_polywhaler_leaderboard: use_leaderboard,
@@ -107,7 +108,7 @@ impl Config {
             },
             simulation_mode: env("SIMULATION_MODE", "false").to_lowercase() == "true",
             polysimulator_api_key: optional_env("POLYSIMULATOR_API_KEY"),
-            polymarket_signature_type: env("POLYMARKET_SIGNATURE_TYPE", "EOA").to_uppercase(),
+            polymarket_signature_type: sig_type_config,
             rpc_url: env("RPC_URL", ""),
         })
     }
@@ -129,7 +130,9 @@ impl Config {
 }
 
 fn env(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_owned())
+    std::env::var(key)
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_else(|_| default.to_owned())
 }
 
 fn optional_env(key: &str) -> Option<String> {

@@ -10,6 +10,7 @@ mod trader;
 mod utils;
 mod websocket_monitor;
 mod types;
+mod cache;
 mod bot;
 mod leaderboard;
 
