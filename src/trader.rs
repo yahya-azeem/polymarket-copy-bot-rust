@@ -38,6 +38,7 @@ const SIG_TYPE_AUTO: u8 = 0;
 const SIG_TYPE_EOA: u8 = 1;
 const SIG_TYPE_PROXY: u8 = 2;
 const SIG_TYPE_GNOSIS_SAFE: u8 = 3;
+const SIG_TYPE_POLY1271: u8 = 4;
 
 type AuthClient = ClobClient<Authenticated<Normal>>;
 
@@ -160,7 +161,8 @@ impl TradeExecutor {
 
         let should_detect = self.config.polymarket_signature_type == "AUTO" 
             || sig_type == SignatureType::Proxy 
-            || sig_type == SignatureType::GnosisSafe;
+            || sig_type == SignatureType::GnosisSafe
+            || sig_type == SignatureType::Poly1271;
 
         if should_detect {
             let addr = format!("{:?}", signer.address()).trim_matches('"').to_lowercase();
@@ -173,12 +175,19 @@ impl TradeExecutor {
                             if !proxy.is_empty() && proxy != "0x0000000000000000000000000000000000000000" {
                                 info!("🎯 Detected Active Proxy: {}", proxy);
                                 if self.config.polymarket_signature_type == "AUTO" {
-                                    sig_type = SignatureType::GnosisSafe;
+                                    // Default to Poly1271 for V2 Deposit Wallet flow when proxy is detected
+                                    sig_type = SignatureType::Poly1271;
                                 }
                                 proxy_addr = Some(Address::from_str(proxy.trim())?);
                                 
                                 // Update internal atomic state
-                                let sig_val = if sig_type == SignatureType::Proxy { SIG_TYPE_PROXY } else { SIG_TYPE_GNOSIS_SAFE };
+                                let sig_val = if sig_type == SignatureType::Proxy {
+                                    SIG_TYPE_PROXY
+                                } else if sig_type == SignatureType::GnosisSafe {
+                                    SIG_TYPE_GNOSIS_SAFE
+                                } else {
+                                    SIG_TYPE_POLY1271
+                                };
                                 self.detected_sig_type.store(sig_val, Ordering::Relaxed);
                             }
                         }
@@ -1219,13 +1228,16 @@ impl TradeExecutor {
             return match detected {
                 SIG_TYPE_EOA => SignatureType::Eoa,
                 SIG_TYPE_PROXY => SignatureType::Proxy,
-                _ => SignatureType::GnosisSafe,
+                SIG_TYPE_GNOSIS_SAFE => SignatureType::GnosisSafe,
+                SIG_TYPE_POLY1271 => SignatureType::Poly1271,
+                _ => SignatureType::Eoa,
             };
         }
 
         match self.config.polymarket_signature_type.as_str() {
             "PROXY" => SignatureType::Proxy,
             "GNOSIS_SAFE" => SignatureType::GnosisSafe,
+            "POLY_1271" => SignatureType::Poly1271,
             _ => SignatureType::Eoa,
         }
     }
