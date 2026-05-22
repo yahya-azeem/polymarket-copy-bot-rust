@@ -413,7 +413,7 @@ impl TradeExecutor {
         let fallback_addr = "0x83A6487eE74712F2d2f703554e2A0D0704443916".to_lowercase();
 
         // 1. CLOB API: try without token_id first (returns combined collateral balance)
-        for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe] {
+        for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe, SignatureType::Poly1271] {
             let req = BalanceAllowanceRequest::builder()
                 .asset_type(AssetType::Collateral)
                 .signature_type(sig)
@@ -428,7 +428,7 @@ impl TradeExecutor {
         }
 
         // 2. CLOB API: try specific token IDs (USDC, USDC.e, pUSD)
-        for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe] {
+        for sig in [SignatureType::Eoa, SignatureType::Proxy, SignatureType::GnosisSafe, SignatureType::Poly1271] {
             for (label, token) in [("USDC", USDC_NATIVE), ("USDC.e", USDC_BRIDGED), ("pUSD", PUSD)] {
                 let Ok(token_id) = U256::from_str(token) else { continue };
                 let req = BalanceAllowanceRequest::builder()
@@ -944,23 +944,7 @@ impl TradeExecutor {
             return Ok(());
         }
 
-        let clob = self
-            .clob
-            .read()
-            .await
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| anyhow!("trader not initialized"))?;
-        let bal = clob
-            .balance_allowance(
-                BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Collateral)
-                    .signature_type(sig_type)
-                    .build(),
-            )
-            .await?;
-        let raw_amount = bal.balance.to_string().parse::<f64>().unwrap_or(0.0);
-        let amount = raw_amount / 1_000_000.0; // USDC has 6 decimal places on Polygon
+        let amount = self.get_your_balance_usdc().await?;
         
         if amount < copy_notional {
             error!("💰 BALANCE ALERT: Your Polymarket exchange balance is {:.2} USDC.", amount);
